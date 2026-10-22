@@ -63,7 +63,7 @@ exe = EXE(pyz,
           strip=False,
           upx=False,
           contents_directory='.',
-          uac_admin=True,
+          uac_admin=False,
           console={4} , version='tmp.txt', icon='{0}exe\\\\icon.ico')
 
 coll = COLLECT(exe,
