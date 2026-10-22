@@ -15,6 +15,10 @@ import os
 os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
 if __name__ == "__main__":
+    ping_scan = '--ping' in argv
+    if ping_scan:
+        argv.remove('--ping')
+
     app = QApplication(argv)
     app.setStyle(QStyleFactory.create('Fusion'))
     icon = ElmoCut.processIcon(app_icon)
@@ -41,9 +45,12 @@ if __name__ == "__main__":
         GUI.killer.iface = GUI.scanner.iface
         GUI.sync_ip_forwarding_state()
         GUI.scanner.flush_arp()
-        GUI.scanEasy()
+        if ping_scan:
+            GUI.scanHard()
+        else:
+            GUI.scanEasy()
         GUI.UpdateThread_Starter()
-        # Bring window to top on startup
+        # Bring window to top
         GUI.activateWindow()
         #GUI.scanner.print_report()
         exit(app.exec())
