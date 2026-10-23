@@ -208,7 +208,7 @@ class Scanner():
             )
             for line in result.stdout.splitlines():
                 match = re.match(
-                    r"^\\s*([^\\s<]+)\\s+<00>\\s+UNIQUE\\b",
+                    r"^\s*([^\s<]+)\s+<00>\s+UNIQUE\b",
                     line,
                     re.IGNORECASE
                 )
