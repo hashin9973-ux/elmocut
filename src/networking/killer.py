@@ -133,7 +133,12 @@ class Killer:
             if device.admin or device.mac in exclude_macs:
                 continue
             if device.mac not in self.killed:
-                self.kill(device)
+                if not getattr(device, 'online', True):
+                    # Preserve the requested state without transmitting frames
+                    # to a potentially reassigned IP/MAC pair.
+                    self.killed[device.mac] = device
+                else:
+                    self.kill(device)
 
     def unkill_all(self):
         """
