@@ -394,15 +394,17 @@ class Scanner():
             except Exception as exc:
                 print(f"[Scanner] Fallback arping discovery failed: {exc}")
 
-        # Ping the complete subnet with bounded concurrency and no visible
-        # console windows. These replies also warm the Windows neighbor cache.
+        # Repeat ICMP and probe TCP services to find hosts that block echo
+        # requests but expose a common service. This is an independent
+        # implementation using documented discovery methods, not copied code
+        # from Advanced IP Scanner.
         def ping_target(ip):
             try:
                 result = subprocess.run(
-                    ["ping", "-n", "1", "-w", "400", ip],
+                    ["ping", "-n", "2", "-w", "450", ip],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=1.5,
+                    timeout=2.0,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 )
                 return result.returncode == 0
@@ -419,10 +421,41 @@ class Scanner():
                         ping_alive.add(ip)
                 except Exception as exc:
                     print(f"[Scanner] Ping task for {ip} failed: {exc}")
-                self.qt_progress_signal(min(200, int(200 * completed / len(target_ips))))
+                self.qt_progress_signal(min(140, int(140 * completed / len(target_ips))))
 
-        # Read the Windows ARP cache directly, including static entries. Do not
-        # rely on locale-sensitive "findstr dynamic" output.
+        # Probe common Windows, server, printer, camera and web ports. An open
+        # TCP port is positive evidence of a live host even when ICMP is blocked.
+        tcp_ports = (80, 443, 445, 139, 22, 3389, 8080, 554, 9100)
+
+        def tcp_target(ip):
+            for port in tcp_ports:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                        connection.settimeout(0.22)
+                        if connection.connect_ex((ip, port)) == 0:
+                            return True
+                except OSError:
+                    continue
+            return False
+
+        tcp_alive = set()
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            futures = {executor.submit(tcp_target, ip): ip for ip in target_ips}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                ip = futures[future]
+                try:
+                    if future.result():
+                        tcp_alive.add(ip)
+                except Exception as exc:
+                    print(f"[Scanner] TCP probe for {ip} failed: {exc}")
+                self.qt_progress_signal(
+                    140 + int(70 * completed / len(target_ips))
+                )
+
+        responsive_ips = ping_alive | tcp_alive | set(discovered.keys())
+
+        # Use cached entries only for hosts that showed positive evidence in
+        # this scan. Old/stale ARP records must not keep offline hosts active.
         try:
             cache = subprocess.run(
                 ["arp", "-a", "-N", self.my_ip],
@@ -450,10 +483,36 @@ class Scanner():
 
             mac = good_mac(parts[1])
             if (
-                re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
+                ip in responsive_ips
+                and re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
                 and mac != GLOBAL_MAC
             ):
                 discovered.setdefault(ip, mac)
+
+        # ICMP/TCP responders missing a cached MAC get a targeted ARP attempt.
+        missing_mac_ips = sorted(
+            responsive_ips - set(discovered.keys()),
+            key=lambda value: int(value.rsplit(".", 1)[-1])
+        )
+        if missing_mac_ips:
+            try:
+                arp_packets = [
+                    Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip)
+                    for ip in missing_mac_ips
+                ]
+                answered, _ = srp(
+                    arp_packets,
+                    iface=self.iface.name,
+                    timeout=1.2,
+                    retry=0,
+                    verbose=0
+                )
+                for _, received in answered:
+                    ip, mac = received.psrc, good_mac(received.hwsrc)
+                    if ip and mac and mac != GLOBAL_MAC:
+                        discovered[ip] = mac
+            except Exception as exc:
+                print(f"[Scanner] Targeted ARP resolution failed: {exc}")
 
         # Resolve names only for devices whose MAC addresses we actually know.
         # Every lookup is a process with a timeout, so name discovery cannot
@@ -477,7 +536,7 @@ class Scanner():
                         print(f"[Scanner] Name lookup for {ip} failed: {exc}")
                         hostnames[ip] = ""
                     self.qt_progress_signal(
-                        200 + int(52 * completed / len(name_ips))
+                        210 + int(42 * completed / len(name_ips))
                     )
         else:
             self.qt_progress_signal(252)
@@ -485,7 +544,8 @@ class Scanner():
         scan_result = [(ip, mac) for ip, mac in discovered.items()]
         print(
             f"[Scanner] Advanced scan found {len(scan_result)} local devices "
-            f"({len(ping_alive)} ICMP responders) on {network}"
+            f"({len(ping_alive)} ICMP responders, "
+            f"{len(tcp_alive)} TCP responders) on {network}"
         )
 
         # Commit results before marking the scan complete.
