@@ -1,7 +1,7 @@
 from qdarkstyle import load_stylesheet
 from pyperclip import copy
 
-from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, \
+from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, QStyle, \
                             QMenu, QSystemTrayIcon
 from PyQt6.QtGui import QPixmap, QIcon, QAction
 from PyQt6.QtCore import Qt
@@ -76,6 +76,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.buttons = [
             (self.btnScanEasy,   self.scanEasy,      scan_easy_icon,  'Arping Scan'),
             (self.btnScanHard,   self.scanHard,      scan_hard_icon,  'Pinging Scan'),
+            (self.btnScanAdvanced, self.scanAdvanced, scan_hard_icon, 'Advanced Discovery Scan (ARP + ICMP + device-name detection)'),
             (self.btnKill,       self.kill,          kill_icon,       'Kill selected device'),
             (self.btnUnkill,     self.unkill,        unkill_icon,     'Un-kill selected device'),
             (self.btnKillAll,    self.killAll,       killall_icon,    'Kill all devices'),
@@ -88,6 +89,11 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             btn.setToolTip(btn_tip)
             btn.clicked.connect(btn_func)
             btn.setIcon(self.processIcon(btn_icon))
+
+        # Give the advanced discovery action a distinct built-in network icon.
+        self.btnScanAdvanced.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
+        )
 
         clickable(self.lblDonate).connect(self.buymeacoffee)
         self.setImage(self.lblDonate, donate_icon)
@@ -423,7 +429,11 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tableScan.setItem(row, column, ql)
 
     def fillTableRow(self, row, device: Device):
-        if device.admin:
+        # Unavailable rows remain fully selectable and actionable; grey is
+        # their only visual distinction from currently responding devices.
+        if not device.online:
+            colors = ['#888888', '#252525']
+        elif device.admin:
             colors = ['#00ff00', '#000000']
         elif device.mac in self.watched_devices:
             colors = ['#ffff00', '#000000']
@@ -431,9 +441,10 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             colors = ['#ff0000', '#ffffff']
         else:
             colors = []
-        
+
         props = device.to_dict()
-        del props['admin']
+        props.pop('admin', None)
+        props.pop('online', None)
 
         for column, prop in enumerate(props.values()):
             self.fillTableCell(row, column, prop, colors)
@@ -450,10 +461,15 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             print(f'>> {device}')
             self.fillTableRow(row, device)
         
-        status = f'{len(self.scanner.devices) - 2} devices' \
+        user_devices = [device for device in self.scanner.devices if not device.admin]
+        online_count = sum(device.online for device in user_devices)
+        offline_count = len(user_devices) - online_count
+        unavailable_summary = f', {offline_count} unavailable' if offline_count else ''
+        status = f'{online_count} devices{unavailable_summary}' \
                  f' ({len(self.killer.killed)} killed)'
-        
-        status_tray = f'Devices Found: {len(self.scanner.devices) - 2}\n' \
+
+        status_tray = f'Devices Found: {online_count}\n' \
+                      f'Devices Unavailable: {offline_count}\n' \
                       f'Devices Killed: {len(self.killer.killed)}\n' \
                       f'Interface: {self.scanner.iface.name}'
         
@@ -596,10 +612,15 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
     
     def scanHard(self):
         """
-        Hard Scan button connector
+        Existing ping scan button connector.
         """
-        # Set correct max for progress bar
         self.ScanThread_Starter(scan_type=1)
+
+    def scanAdvanced(self):
+        """
+        Dedicated ARP + ICMP sweep with hostname enrichment.
+        """
+        self.ScanThread_Starter(scan_type=2)
 
     def ScanThread_Starter(self, scan_type=0):
         """
@@ -615,14 +636,17 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.killer.unkill_all()
 
-        self.log(
-            ['Arping', 'Pinging'][scan_type] + ' your network...',
-            ['aqua', 'fuchsia'][scan_type]
-        )
+        scan_labels = {
+            0: ('Arping', 'aqua'),
+            1: ('Pinging', 'fuchsia'),
+            2: ('Advanced discovery', 'cyan')
+        }
+        scan_label, scan_color = scan_labels[scan_type]
+        self.log(scan_label + ' your network...', scan_color)
 
         self.pgbar.setVisible(True)
-        self.pgbar.setMaximum(self.scanner.device_count)
-        self.pgbar.setValue(self.scanner.device_count * (not scan_type))
+        self.pgbar.setMaximum(253 if scan_type == 2 else self.scanner.device_count)
+        self.pgbar.setValue(0 if scan_type == 2 else self.scanner.device_count * (not scan_type))
         
         self.scan_thread.scanner = self.scanner
         self.scan_thread.scan_type = scan_type
