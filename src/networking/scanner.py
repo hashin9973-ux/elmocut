@@ -126,19 +126,27 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
-    def devices_appender(self, scan_result, hostnames=None, mark_missing_offline=False, port_results=None):
+    def devices_appender(
+        self,
+        scan_result,
+        hostnames=None,
+        mark_missing_offline=False,
+        port_results=None,
+        online_ips=None
+    ):
         """
-        Merge discovered devices without treating a weak scan as proof that
-        previously known devices went offline.
+        Merge scan evidence without dropping known devices after a partial pass.
 
-        Basic scans never mark absent devices offline because their discovery
-        methods have different coverage. Advanced scans must repeatedly produce
-        a credible result before an absent device is shown as unavailable.
+        A MAC from ARP/ICMP/TCP evidence is confirmed online. A MAC present
+        only in the Windows ARP cache is retained as an unconfirmed candidate:
+        it is listed, but it does not reset the missed-scan counter or count as
+        proof that a previously known device is online.
         """
         nicknames = Nicknames()
         hostnames = hostnames or {}
         has_port_results = port_results is not None
         port_results = port_results or {}
+        confirmed_ips = None if online_ips is None else set(online_ips)
         previous_devices = {
             device.mac: device for device in self.devices
             if not device.admin and device.mac
@@ -148,8 +156,6 @@ class Scanner():
             if getattr(device, "online", True)
         }
 
-        # Validate input before using it to decide whether a scan was complete.
-        # Empty, malformed, or MAC-less results are not evidence of absence.
         clean_results = []
         for entry in scan_result or []:
             if not isinstance(entry, (tuple, list)) or len(entry) < 2:
@@ -171,8 +177,11 @@ class Scanner():
             clean_results.append((ip, mac, entry))
 
         clean_results.sort(key=lambda item: int(item[0].rsplit(".", 1)[-1]))
-        discovered_macs = {mac for _, mac, _ in clean_results}
-        previously_known_hits = len(previous_online_macs & discovered_macs)
+        confirmed_macs = {
+            mac for ip, mac, _ in clean_results
+            if confirmed_ips is None or ip in confirmed_ips
+        }
+        previously_known_hits = len(previous_online_macs & confirmed_macs)
         required_known_hits = max(1, (len(previous_online_macs) + 1) // 2)
         credible_advanced_result = (
             mark_missing_offline
@@ -182,18 +191,50 @@ class Scanner():
         self.devices = []
         seen_macs = set()
         active_macs = set()
+        cache_only_macs = set()
 
         for ip, mac, entry in clean_results:
             if mac in seen_macs:
                 continue
-
             seen_macs.add(mac)
-            active_macs.add(mac)
             previous = previous_devices.get(mac)
+            confirmed_online = confirmed_ips is None or ip in confirmed_ips
+
+            # An ARP-cache-only record is useful as last-known inventory, but
+            # it is not proof of current availability. Keep prior details and
+            # age it only when this scan produced credible live responses.
+            if not confirmed_online:
+                cache_only_macs.add(mac)
+                if previous is not None:
+                    if credible_advanced_result:
+                        misses = self.missed_advanced_scans.get(mac, 0) + 1
+                        self.missed_advanced_scans[mac] = misses
+                        if misses >= 3:
+                            previous.online = False
+                    self.devices.append(previous)
+                else:
+                    nickname = nicknames.get_name(mac)
+                    if nickname in ("", None):
+                        nickname = "-"
+                    self.devices.append(
+                        Device(
+                            ip=ip,
+                            mac=mac,
+                            vendor=get_vendor(mac),
+                            dtype=DeviceType.USER,
+                            hostname=hostnames.get(ip, ""),
+                            open_ports=sorted(set(port_results.get(ip, []))),
+                            name=nickname,
+                            admin=False,
+                            online=False
+                        )
+                    )
+                continue
+
+            active_macs.add(mac)
             self.old_ips[mac] = ip
 
-            # Persisted user nicknames always win. If a legacy/corrupt MAC key
-            # prevented lookup, retain the in-memory custom nickname as fallback.
+            # Persisted user nicknames always win over discovered hostnames.
             nickname = nicknames.get_name(mac)
             if nickname in ("", None, "-") and previous is not None:
                 previous_name = getattr(previous, "name", "-")
@@ -219,7 +260,8 @@ class Scanner():
                     open_ports=(
                         sorted(set(port_results.get(ip, [])))
                         if has_port_results
-                        else list(getattr(previous, 'open_ports', [])) if previous is not None else []
+                        else list(getattr(previous, "open_ports", []))
+                        if previous is not None else []
                     ),
                     name=nickname,
                     admin=False,
@@ -227,19 +269,20 @@ class Scanner():
                 )
             )
 
-        # A device must be absent from three credible advanced sweeps before
-        # it is greyed out. Zero-result and low-coverage scans do not count.
+        # Devices not seen in either live evidence or the cache remain listed.
+        # Only credible advanced scans increment their unavailable counter.
         for mac, device in previous_devices.items():
-            if mac not in active_macs:
-                if credible_advanced_result:
-                    misses = self.missed_advanced_scans.get(mac, 0) + 1
-                    self.missed_advanced_scans[mac] = misses
-                    if misses >= 3:
-                        device.online = False
-                self.devices.append(device)
+            if mac in seen_macs:
+                continue
+            if credible_advanced_result:
+                misses = self.missed_advanced_scans.get(mac, 0) + 1
+                self.missed_advanced_scans[mac] = misses
+                if misses >= 3:
+                    device.online = False
+            self.devices.append(device)
 
-        # Retain watched devices that are not in Scanner.devices yet.
-        for mac in set(self.parent.watched_devices.keys()) - active_macs:
+        # Retain watched devices that have not yet appeared in Scanner.devices.
+        for mac in set(self.parent.watched_devices.keys()) - seen_macs:
             if mac in previous_devices:
                 continue
             window = self.parent.device_windows.get(mac)
@@ -251,23 +294,20 @@ class Scanner():
                         window.device.online = False
                 self.devices.append(window.device)
 
-        # Keep mappings for active and retained devices so IP changes remain
-        # associated with the same MAC address on subsequent scans.
         self.old_ips = {d.mac: d.ip for d in self.devices if d.mac}
-
         self.add_me()
         self.add_router()
 
         print(
             f"Scanner found {len(self.devices)} devices "
-            f"({len(active_macs)} discovered user MACs; "
+            f"({len(active_macs)} confirmed user MACs, "
+            f"{len(cache_only_macs)} ARP-cache-only records; "
             f"credible advanced result={credible_advanced_result}): {self.devices}"
         )
 
-        # Clear the ARP cache only after some devices were captured.
-        if active_macs:
-            self.flush_arp()
-
+        # Flushing every successful scan destroys useful neighbour-cache
+        # evidence and increases misses on the next sweep. Leave it intact;
+        # normal Windows cache ageing will remove stale entries.
     def arping_cache(self):
         """
         Showing system arp cache after pinging
@@ -474,8 +514,10 @@ class Scanner():
 
         responsive_ips = ping_alive | tcp_alive | set(discovered.keys())
 
-        # Use cached entries only for hosts that showed positive evidence in
-        # this scan. Old/stale ARP records must not keep offline hosts active.
+        # Read Windows ARP/neighbour entries even when ping/TCP does not
+        # respond. Many real devices filter probes or expose different ports.
+        # These entries are passed as unconfirmed inventory, not online proof.
+        cache_only = {}
         try:
             cache = subprocess.run(
                 ["arp", "-a", "-N", self.my_ip],
@@ -503,11 +545,13 @@ class Scanner():
 
             mac = good_mac(parts[1])
             if (
-                ip in responsive_ips
-                and re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
+                re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
                 and mac != GLOBAL_MAC
             ):
-                discovered.setdefault(ip, mac)
+                if ip in responsive_ips:
+                    discovered.setdefault(ip, mac)
+                elif ip not in discovered:
+                    cache_only[ip] = mac
 
         # ICMP/TCP responders missing a cached MAC get a targeted ARP attempt.
         missing_mac_ips = sorted(
@@ -562,18 +606,25 @@ class Scanner():
             self.qt_progress_signal(252)
 
         scan_result = [(ip, mac) for ip, mac in discovered.items()]
+        scan_result.extend(
+            (ip, mac) for ip, mac in cache_only.items()
+            if ip not in discovered
+        )
         print(
-            f"[Scanner] Advanced scan found {len(scan_result)} local devices "
+            f"[Scanner] Advanced scan found {len(discovered)} confirmed local "
+            f"devices plus {len(cache_only)} ARP-cache-only records "
             f"({len(ping_alive)} ICMP responders, "
             f"{len(tcp_alive)} TCP responders) on {network}"
         )
 
-        # Commit results before marking the scan complete.
+        # Only active response evidence is allowed to reset a device's missed
+        # scan counter. Cache-only records stay visible but remain unconfirmed.
         self.devices_appender(
             scan_result,
             hostnames,
             mark_missing_offline=True,
-            port_results=open_ports_by_ip
+            port_results=open_ports_by_ip,
+            online_ips=responsive_ips
         )
         self.qt_progress_signal(253)
 
