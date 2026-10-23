@@ -1,6 +1,10 @@
-from concurrent.futures.thread import ThreadPoolExecutor
-from scapy.all import arping
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from scapy.all import arping, ARP, Ether, srp
 from time import sleep
+import ipaddress
+import re
+import socket
+import subprocess
 from networking.nicknames import Nicknames
 from tools.utils import *
 from constants import *
@@ -33,8 +37,9 @@ class Scanner():
         Intializing Scanner
         """
         self.iface = get_iface_by_name(self.iface.name)
-        self.devices = []
 
+        # Keep the last result set until devices_appender compares it with
+        # the latest scan. Devices that did not answer become offline records.
         self.router_ip = get_gateway_ip(self.iface.name)
         self.router_mac = get_gateway_mac(self.iface.ip, self.router_ip)
 
@@ -89,66 +94,90 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
-    def devices_appender(self, scan_result):
+    def devices_appender(self, scan_result, hostnames=None):
         """
-        Append scan results to self.devices
+        Refresh active devices while retaining previously known devices that
+        no longer answer. Retained records stay selectable and are marked offline.
         """
         nicknames = Nicknames()
+        hostnames = hostnames or {}
+        previous_devices = {
+            device.mac: device for device in self.devices
+            if not device.admin and device.mac
+        }
 
         self.devices = []
-        unique = []
+        seen_macs = set()
+        active_macs = set()
 
-        # Sort by last part of ip xxx.xxx.x.y
+        # Sort by the last IPv4 octet for a stable table.
         scan_result = sorted(
             scan_result,
-            key=lambda i:int(i[0].split('.')[-1])
+            key=lambda item: int(str(item[0]).strip("()").split(".")[-1])
         )
-        
-        for ip, mac in scan_result:
-            mac = good_mac(mac)
 
-            # Skip me or router and duplicated devices
-            if ip in [self.router_ip, self.my_ip] or mac in unique:
+        for entry in scan_result:
+            if len(entry) < 2:
                 continue
-            
-            # update same device with new ip
-            if self.old_ips.get(mac, ip) != ip:
-                self.old_ips[mac] = ip
-                unique.append(mac)
+            ip, mac = str(entry[0]).strip("()"), good_mac(str(entry[1]))
+            if ip in [self.router_ip, self.my_ip] or mac in seen_macs:
+                continue
+
+            seen_macs.add(mac)
+            active_macs.add(mac)
+            previous = previous_devices.get(mac)
+            self.old_ips[mac] = ip
+
+            nickname = nicknames.get_name(mac)
+            if nickname == "-" and previous is not None:
+                nickname = previous.name
+
+            hostname = hostnames.get(ip, "")
+            if not hostname and len(entry) > 2:
+                hostname = str(entry[2] or "")
+            if not hostname and previous is not None:
+                hostname = previous.hostname
 
             self.devices.append(
                 Device(
-                    ip = ip,
-                    mac = mac,
-                    vendor = get_vendor(mac),
-                    dtype = DeviceType.USER,
-                    name = nicknames.get_name(mac),
-                    admin = False
+                    ip=ip,
+                    mac=mac,
+                    vendor=get_vendor(mac),
+                    dtype=DeviceType.USER,
+                    hostname=hostname,
+                    name=nickname,
+                    admin=False,
+                    online=True
                 )
             )
-        
-        # Remove device with old ip
-        for device in self.devices[:]:
-            mac, ip = device.mac, device.ip
-            if self.old_ips.get(mac, ip) != ip:
-                self.devices.remove(device)
 
-        present_macs = {d.mac for d in self.devices}
-        for mac in set(self.parent.watched_devices.keys()) - present_macs:
+        # Retain disappeared devices with their last-known details. This does
+        # not disable row selection or the existing device actions.
+        for mac, device in previous_devices.items():
+            if mac not in active_macs:
+                device.online = False
+                self.devices.append(device)
+
+        # Also retain any watched device not yet represented in the last scan.
+        for mac in set(self.parent.watched_devices.keys()) - active_macs:
+            if mac in previous_devices:
+                continue
             window = self.parent.device_windows.get(mac)
             if window and window.device:
+                window.device.online = False
                 self.devices.append(window.device)
-        
-        # Re-create devices old ips dict
-        self.old_ips = {d.mac: d.ip for d in self.devices}
+
+        # Keep the mapping for active and retained devices so an IP change for a
+        # known MAC is handled on the next scan.
+        self.old_ips = {d.mac: d.ip for d in self.devices if d.mac}
 
         self.add_me()
         self.add_router()
 
         print(f'Scanner found {len(self.devices)} devices: {self.devices}')
 
-        # Clear arp cache to avoid duplicates next time
-        if unique:
+        # Clear the ARP cache after results have been captured.
+        if active_macs:
             self.flush_arp()
     
     def arping_cache(self):
@@ -166,6 +195,145 @@ class Scanner():
         clean_result = [line.split()[:2] for line in scan_result.split('\n') if line.split()]
         self.devices_appender(clean_result)
     
+    def _resolve_device_name(self, ip):
+        """Try Windows NetBIOS name discovery, then reverse DNS."""
+        try:
+            result = subprocess.run(
+                ["nbtstat", "-A", ip],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=1.5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            for line in result.stdout.splitlines():
+                match = re.match(
+                    r"^\\s*([^\\s<]+)\\s+<00>\\s+UNIQUE\\b",
+                    line,
+                    re.IGNORECASE
+                )
+                if match:
+                    hostname = match.group(1).strip()
+                    if hostname and hostname.upper() not in {
+                        "WORKGROUP", "__MSBROWSE__"
+                    }:
+                        return hostname
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        try:
+            previous_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(1.0)
+            try:
+                return socket.gethostbyaddr(ip)[0].rstrip(".").split(".")[0]
+            finally:
+                socket.setdefaulttimeout(previous_timeout)
+        except (OSError, socket.herror, socket.gaierror):
+            return ""
+
+    def advanced_scan(self):
+        """
+        Discover devices across the local /24 using both ARP and ICMP, then
+        enrich each result with a Windows NetBIOS name or reverse-DNS hostname.
+        """
+        self.init()
+        try:
+            network = ipaddress.ip_network(f"{self.my_ip}/24", strict=False)
+        except ValueError:
+            print(f"[Scanner] Cannot determine local IPv4 network from {self.my_ip!r}")
+            self.devices_appender([])
+            return
+
+        target_ips = [
+            str(address) for address in network.hosts()
+            if str(address) != self.my_ip
+        ]
+        self.qt_progress_signal(0)
+
+        # ARP finds local devices even when they ignore ICMP echo requests.
+        discovered = {}
+        try:
+            answered, _ = srp(
+                Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=str(network)),
+                iface=self.iface.name,
+                timeout=1.5,
+                retry=1,
+                verbose=0
+            )
+            for _, received in answered:
+                ip, mac = received.psrc, good_mac(received.hwsrc)
+                if ip and mac:
+                    discovered[ip] = mac
+        except Exception as exc:
+            print(f"[Scanner] Advanced ARP discovery failed: {exc}")
+
+        # Also perform a bounded-concurrency ping sweep. Successful replies can
+        # populate the Windows ARP cache and supplement the direct ARP results.
+        def ping_target(ip):
+            try:
+                result = subprocess.run(
+                    ["ping", "-n", "1", "-w", "500", ip],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=1.5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
+                return result.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                return False
+
+        ping_alive = set()
+        with ThreadPoolExecutor(max_workers=64) as executor:
+            futures = {executor.submit(ping_target, ip): ip for ip in target_ips}
+            for completed, future in enumerate(as_completed(futures), start=1):
+                ip = futures[future]
+                try:
+                    if future.result():
+                        ping_alive.add(ip)
+                except Exception:
+                    pass
+                self.qt_progress_signal(completed)
+
+        # Merge IP-to-MAC mappings learned by Windows while the ping sweep ran.
+        cache_output = terminal(CMD_ARP_CACHE(self.my_ip))
+        if cache_output:
+            for line in cache_output.splitlines():
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                ip = parts[0].strip("()")
+                try:
+                    if ipaddress.ip_address(ip) not in network:
+                        continue
+                except ValueError:
+                    continue
+                mac = good_mac(parts[1])
+                if re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
+                    discovered.setdefault(ip, mac)
+
+        # Resolve names only for devices with a known MAC, avoiding a lengthy
+        # name lookup for every address in the subnet.
+        hostnames = {}
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            futures = {
+                executor.submit(self._resolve_device_name, ip): ip
+                for ip in discovered
+                if ip not in (self.my_ip, self.router_ip)
+            }
+            for future in as_completed(futures):
+                ip = futures[future]
+                try:
+                    hostnames[ip] = future.result() or ""
+                except Exception:
+                    hostnames[ip] = ""
+
+        scan_result = [(ip, mac) for ip, mac in discovered.items()]
+        print(
+            f"[Scanner] Advanced scan found {len(scan_result)} local devices "
+            f"({len(ping_alive)} ICMP responders) on {network}"
+        )
+        self.devices_appender(scan_result, hostnames)
+
     def arp_scan(self):
         """
         Scan using Scapy arping method 
