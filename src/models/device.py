@@ -5,6 +5,8 @@ class Device:
         self.vendor = kwargs['vendor']
         self.type = kwargs['dtype']
         self.hostname = kwargs.get('hostname', '')
+        # Ports observed open during the latest advanced discovery scan.
+        self.open_ports = list(kwargs.get('open_ports', []))
         self.name = kwargs['name']
         self.admin = kwargs['admin']
         self.online = kwargs.get('online', True)
