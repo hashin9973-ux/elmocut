@@ -65,7 +65,7 @@ def send_command_to_existing_instance(command):
     try:
         with socket.create_connection((IPC_HOST, IPC_PORT), timeout=0.5) as client:
             client.settimeout(1.5)
-            client.sendall((command + "\\n").encode("ascii"))
+            client.sendall((command + "\n").encode("ascii"))
             return client.recv(32).strip() == b"OK"
     except OSError:
         return False
