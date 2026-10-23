@@ -190,6 +190,10 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.settings_window.updateElmocutSettings()
 
     def trayShowClicked(self):
+        # Explicitly showing the UI switches this session back to interactive
+        # mode; future user-started scans may show normal error dialogs again.
+        self.background_mode = False
+        self.silent_scan = False
         self.show()
         # Restore window state if was minimized before hidden
         self.setWindowState(Qt.WindowState.WindowNoState)
