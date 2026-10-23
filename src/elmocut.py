@@ -254,9 +254,7 @@ if __name__ == "__main__":
                     startup_log("Starting initial easy scan")
                     GUI.scanEasy()
 
-                startup_log("Starting update thread")
-                GUI.UpdateThread_Starter()
-                startup_log("Update thread started")
+                startup_log("Version update checks are disabled")
                 startup_state["ready"] = True
                 startup_log("GUI initialization marked ready")
 
