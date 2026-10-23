@@ -3,7 +3,7 @@ from pyperclip import copy
 
 from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, QStyle, \
                             QMenu, QSystemTrayIcon
-from PyQt6.QtGui import QPixmap, QIcon, QAction
+from PyQt6.QtGui import QPixmap, QIcon, QAction, QColor
 from PyQt6.QtCore import Qt
 from ui.ui_main import Ui_MainWindow
 
@@ -47,6 +47,8 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         
         # Main Props
         self.watched_devices: dict[str, ElmoDivert] = {}
+        self.background_mode = False
+        self.silent_scan = False
         self.scanner = Scanner(self)
         self.killer = Killer()
 
@@ -400,38 +402,39 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         window.activateWindow()
         window.raise_()
     
-    def fillTableCell(self, row, column, text, colors=[]):
-        # Center text in table cell
+    def fillTableCell(self, row, column, text, colors=None, foreground=None):
+        # Foreground fading is independent of the state background. An offline
+        # killed device therefore remains visibly red rather than becoming grey.
         ql = QTableWidgetItem()
-        ql.setText(text)
+        ql.setText(str(text))
         ql.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
         if colors:
             colored_item(ql, *colors)
-        
-        # Add cell to the specific location
+        if foreground:
+            ql.setForeground(QColor(foreground))
+
         self.tableScan.setItem(row, column, ql)
 
     def fillTableRow(self, row, device: Device):
-        # Unavailable rows remain fully selectable and actionable; grey is
-        # their only visual distinction from currently responding devices.
-        if not device.online:
-            colors = ['#888888', '#252525']
-        elif device.admin:
+        # Preserve active state colours, especially the red killed state.
+        # Unavailable devices only have dimmed text; no grey row background.
+        if device.admin:
             colors = ['#00ff00', '#000000']
         elif device.mac in self.watched_devices:
             colors = ['#ffff00', '#000000']
         elif device.mac in self.killer.killed:
             colors = ['#ff0000', '#ffffff']
         else:
-            colors = []
+            colors = None
 
+        foreground = '#b5b5b5' if not device.online else None
         props = device.to_dict()
         props.pop('admin', None)
         props.pop('online', None)
 
         for column, prop in enumerate(props.values()):
-            self.fillTableCell(row, column, prop, colors)
+            self.fillTableCell(row, column, prop, colors, foreground)
 
     def showDevices(self):
         """
@@ -588,29 +591,30 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.showDevices()
 
-    def scanEasy(self):
+    def scanEasy(self, silent=False):
         """
-        Easy Scan button connector
+        Easy Scan button connector.
         """
-        self.ScanThread_Starter()
+        self.ScanThread_Starter(silent=silent)
     
-    def scanHard(self):
+    def scanHard(self, silent=False):
         """
         Existing ping scan button connector.
         """
-        self.ScanThread_Starter(scan_type=1)
+        self.ScanThread_Starter(scan_type=1, silent=silent)
 
-    def scanAdvanced(self):
+    def scanAdvanced(self, silent=False):
         """
-        Dedicated ARP + ICMP sweep with hostname enrichment.
+        ARP + ICMP/TCP sweep with hostname enrichment.
         """
-        self.ScanThread_Starter(scan_type=2)
+        self.ScanThread_Starter(scan_type=2, silent=silent)
 
-    def ScanThread_Starter(self, scan_type=0):
+    def ScanThread_Starter(self, scan_type=0, silent=False):
         """
         Scan Thread Starter
         """
-        if not self.connected(show_msg_box=True):
+        self.silent_scan = bool(silent or self.background_mode)
+        if not self.connected(show_msg_box=not self.silent_scan):
             return
 
         self.centralwidget.setEnabled(False)
@@ -646,8 +650,13 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             self.processDevices()
         else:
             self.log('Scan failed. See console output for details.', 'red')
+        self.silent_scan = bool(self.background_mode)
 
     def ScanThread_Error(self, message):
+        if self.silent_scan or self.background_mode:
+            print(f'[Scan Failed] {message}')
+            self.log('Scan failed. See console output for details.', 'red')
+            return
         QMessageBox.critical(self, 'Scan Failed', message)
 
     # Open BuyMeACoffee page
