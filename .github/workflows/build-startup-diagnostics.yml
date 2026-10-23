@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feature/ping-cli-entrypoint
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
