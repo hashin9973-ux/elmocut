@@ -357,7 +357,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         device = self.current_index()
 
         # Get cell text using dict.values instead of .itemAt()
-        cell = list(device.to_dict().values())[column]
+        cell = str(list(device.to_dict().values())[column])
         
         if len(cell) > 20:
             cell = cell[:20] + '...'
@@ -433,7 +433,17 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         props.pop('admin', None)
         props.pop('online', None)
 
-        for column, prop in enumerate(props.values()):
+        port_names = {
+            21: 'FTP', 22: 'SSH', 23: 'Telnet', 53: 'DNS',
+            80: 'HTTP', 135: 'RPC', 139: 'NetBIOS', 443: 'HTTPS',
+            445: 'SMB', 554: 'RTSP', 3389: 'RDP', 5900: 'VNC',
+            8080: 'HTTP-alt', 9100: 'Printer'
+        }
+        for column, (key, prop) in enumerate(props.items()):
+            if key == 'open_ports':
+                prop = ', '.join(
+                    f'{port}/{port_names.get(port, "TCP")}' for port in prop
+                ) or '-'
             self.fillTableCell(row, column, prop, colors, foreground)
 
     def showDevices(self):
