@@ -203,7 +203,7 @@ class Scanner():
                 capture_output=True,
                 text=True,
                 errors="replace",
-                timeout=1.5,
+                timeout=1.0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             for line in result.stdout.splitlines():
@@ -225,11 +225,11 @@ class Scanner():
         # with -a instead so this fallback has a hard subprocess timeout too.
         try:
             result = subprocess.run(
-                ["ping", "-a", "-n", "1", "-w", "400", ip],
+                ["ping", "-a", "-n", "1", "-w", "300", ip],
                 capture_output=True,
                 text=True,
                 errors="replace",
-                timeout=1.5,
+                timeout=1.0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             for line in result.stdout.splitlines():
@@ -355,7 +355,7 @@ class Scanner():
         ]
         hostnames = {}
         if name_ips:
-            with ThreadPoolExecutor(max_workers=16) as executor:
+            with ThreadPoolExecutor(max_workers=32) as executor:
                 futures = {
                     executor.submit(self._resolve_device_name, ip): ip
                     for ip in name_ips
