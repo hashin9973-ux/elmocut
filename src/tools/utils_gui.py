@@ -33,11 +33,9 @@ def duplicate_elmocut():
 
 def check_documents_dir():
     """
-    Check if documents folder exists in order to store settings
+    Ensure the settings directory exists.
     """
     makedirs(DOCUMENTS_PATH, exist_ok=True)
-    if not path.exists(SETTINGS_PATH):
-        export_settings()
 
 def _import_settings_unlocked():
     """
@@ -45,7 +43,13 @@ def _import_settings_unlocked():
     Only call this from inside a block that already holds _settings_lock.
     """
     check_documents_dir()
-    return load(open(SETTINGS_PATH))
+    if not path.exists(SETTINGS_PATH):
+        # This function is called while _settings_lock is held. Use the
+        # unlocked writer to avoid trying to acquire the same non-reentrant
+        # lock a second time during first-run settings creation.
+        _export_settings_unlocked()
+    with open(SETTINGS_PATH, encoding='utf-8') as settings_file:
+        return load(settings_file)
 
 def _export_settings_unlocked(values=None):
     """
