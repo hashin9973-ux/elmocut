@@ -86,13 +86,14 @@ def relaunch_as_admin():
     else:
         parameters = [os.path.abspath(__file__), *argv[1:]]
 
+    show_command = 0 if ("--ping" in argv or "--background" in argv) else 1
     result = ctypes.windll.shell32.ShellExecuteW(
         None,
         "runas",
         sys.executable,
         subprocess.list2cmdline(parameters),
         os.path.dirname(os.path.abspath(sys.executable)),
-        1
+        show_command
     )
     return int(result) > 32
 
@@ -100,7 +101,9 @@ def relaunch_as_admin():
 if __name__ == "__main__":
     startup_log("Entered main entry point")
     ping_scan = "--ping" in argv
+    background_mode = ping_scan or "--background" in argv
     startup_log(f"CLI ping requested: {ping_scan}")
+    startup_log(f"Background mode requested: {background_mode}")
 
     # Forward to an existing app before asking Windows for elevation.
     if ping_scan:
@@ -124,6 +127,8 @@ if __name__ == "__main__":
 
     if ping_scan:
         argv.remove("--ping")
+    if "--background" in argv:
+        argv.remove("--background")
 
     startup_log("Creating QApplication")
     app = QApplication(argv)
@@ -167,16 +172,22 @@ if __name__ == "__main__":
         startup_log("Settings repair completed")
         startup_log("Constructing ElmoCut window")
         GUI = ElmoCut()
+        GUI.background_mode = background_mode
         startup_log("ElmoCut window constructed")
 
-        # Show and paint the main window before network/system initialization.
-        startup_log("Showing main window")
-        GUI.showNormal()
-        GUI.show()
-        GUI.raise_()
-        GUI.activateWindow()
-        app.processEvents()
-        startup_log(f"Main window show calls completed; visible={GUI.isVisible()}")
+        # Background command invocations keep the tray icon active but leave
+        # the main window hidden. Users can open it later from the tray menu.
+        if background_mode:
+            startup_log("Background mode: leaving main window hidden")
+            GUI.hide()
+        else:
+            startup_log("Showing main window")
+            GUI.showNormal()
+            GUI.show()
+            GUI.raise_()
+            GUI.activateWindow()
+            app.processEvents()
+            startup_log(f"Main window show calls completed; visible={GUI.isVisible()}")
 
         startup_state = {"ready": False}
 
@@ -195,10 +206,9 @@ if __name__ == "__main__":
                 QTimer.singleShot(150, run_ping_scan_when_idle)
                 return
 
-            GUI.showNormal()
-            GUI.raise_()
-            GUI.activateWindow()
-            GUI.scanHard()
+            # Keep the current visible/hidden state when the CLI pings an
+            # already running instance; do not steal focus.
+            GUI.scanHard(silent=True)
 
         def accept_cli_connections():
             while ipc_server.hasPendingConnections():
@@ -249,29 +259,31 @@ if __name__ == "__main__":
 
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
-                    GUI.scanHard()
+                    GUI.scanHard(silent=background_mode)
                 else:
                     startup_log("Starting initial easy scan")
-                    GUI.scanEasy()
+                    GUI.scanEasy(silent=background_mode)
 
                 startup_log("Version update checks are disabled")
                 startup_state["ready"] = True
                 startup_log("GUI initialization marked ready")
 
-                # Reassert visibility after startup to support customized Windows builds.
-                GUI.showNormal()
-                GUI.raise_()
-                GUI.activateWindow()
+                # Reassert visibility only for normal interactive startup.
+                if not background_mode:
+                    GUI.showNormal()
+                    GUI.raise_()
+                    GUI.activateWindow()
             except Exception:
                 details = traceback.format_exc()
                 startup_log("STARTUP EXCEPTION:\n" + details)
                 print(details)
-                QMessageBox.critical(
-                    GUI,
-                    "elmoCut startup error",
-                    "elmoCut encountered an error during startup.\n\n"
-                    "Diagnostic log: %LOCALAPPDATA%\\elmoCut\\startup.log"
-                )
+                if not background_mode:
+                    QMessageBox.critical(
+                        GUI,
+                        "elmoCut startup error",
+                        "elmoCut encountered an error during startup.\n\n"
+                        "Diagnostic log: %LOCALAPPDATA%\\elmoCut\\startup.log"
+                    )
 
         # Start the Qt event loop first so the window can paint while
         # network/system startup runs.
