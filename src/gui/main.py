@@ -74,7 +74,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.buttons = [
             (self.btnScanEasy,   self.scanEasy,      scan_easy_icon,  'Arping Scan'),
             (self.btnScanHard,   self.scanHard,      scan_hard_icon,  'Pinging Scan'),
-            (self.btnScanAdvanced, self.scanAdvanced, scan_hard_icon, 'Advanced Discovery Scan (ARP + ICMP + device-name detection)'),
+            (self.btnScanAdvanced, self.scanAdvanced, scan_hard_icon, 'Advanced Discovery Scan (ARP + repeated ICMP + TCP service probes + device-name detection)'),
             (self.btnKill,       self.kill,          kill_icon,       'Kill selected device'),
             (self.btnUnkill,     self.unkill,        unkill_icon,     'Un-kill selected device'),
             (self.btnKillAll,    self.killAll,       killall_icon,    'Kill all devices'),
