@@ -196,7 +196,7 @@ class Scanner():
         self.devices_appender(clean_result)
     
     def _resolve_device_name(self, ip):
-        """Try Windows NetBIOS name discovery, then reverse DNS."""
+        """Resolve a name using bounded Windows commands only."""
         try:
             result = subprocess.run(
                 ["nbtstat", "-A", ip],
@@ -221,31 +221,54 @@ class Scanner():
         except (OSError, subprocess.SubprocessError):
             pass
 
+        # Reverse lookup APIs can block inside the system resolver. Use ping
+        # with -a instead so this fallback has a hard subprocess timeout too.
         try:
-            return socket.gethostbyaddr(ip)[0].rstrip(".").split(".")[0]
-        except (OSError, socket.herror, socket.gaierror):
-            return ""
+            result = subprocess.run(
+                ["ping", "-a", "-n", "1", "-w", "400", ip],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=1.5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            for line in result.stdout.splitlines():
+                match = re.match(
+                    r"^Pinging\s+(.+?)\s+\[\d{1,3}(?:\.\d{1,3}){3}\]",
+                    line,
+                    re.IGNORECASE
+                )
+                if match:
+                    hostname = match.group(1).strip().rstrip(".")
+                    if hostname and hostname != ip:
+                        return hostname
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return ""
 
     def advanced_scan(self):
         """
-        Discover devices across the local /24 using both ARP and ICMP, then
-        enrich each result with a Windows NetBIOS name or reverse-DNS hostname.
+        Discover devices across the local /24 using ARP and ICMP, then enrich
+        known MAC addresses with bounded NetBIOS/reverse-name lookups.
         """
         self.init()
         try:
             network = ipaddress.ip_network(f"{self.my_ip}/24", strict=False)
         except ValueError:
-            print(f"[Scanner] Cannot determine local IPv4 network from {self.my_ip!r}")
-            self.devices_appender([])
-            return
+            raise RuntimeError(
+                f"Cannot determine local IPv4 network from {self.my_ip!r}"
+            )
 
         target_ips = [
             str(address) for address in network.hosts()
             if str(address) != self.my_ip
         ]
+        if not target_ips:
+            raise RuntimeError(f"No scan targets found for {network}")
+
         self.qt_progress_signal(0)
 
-        # ARP finds local devices even when they ignore ICMP echo requests.
+        # ARP can discover hosts that ignore ICMP echo requests.
         discovered = {}
         try:
             answered, _ = srp(
@@ -257,17 +280,17 @@ class Scanner():
             )
             for _, received in answered:
                 ip, mac = received.psrc, good_mac(received.hwsrc)
-                if ip and mac:
+                if ip and mac and mac != GLOBAL_MAC:
                     discovered[ip] = mac
         except Exception as exc:
             print(f"[Scanner] Advanced ARP discovery failed: {exc}")
 
-        # Also perform a bounded-concurrency ping sweep. Successful replies can
-        # populate the Windows ARP cache and supplement the direct ARP results.
+        # Ping the complete subnet with bounded concurrency and no visible
+        # console windows. These replies also warm the Windows neighbor cache.
         def ping_target(ip):
             try:
                 result = subprocess.run(
-                    ["ping", "-n", "1", "-w", "500", ip],
+                    ["ping", "-n", "1", "-w", "400", ip],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=1.5,
@@ -285,54 +308,80 @@ class Scanner():
                 try:
                     if future.result():
                         ping_alive.add(ip)
-                except Exception:
-                    pass
-                self.qt_progress_signal(completed)
+                except Exception as exc:
+                    print(f"[Scanner] Ping task for {ip} failed: {exc}")
+                self.qt_progress_signal(min(200, int(200 * completed / len(target_ips))))
 
-        # Merge IP-to-MAC mappings learned by Windows while the ping sweep ran.
-        cache_output = terminal(CMD_ARP_CACHE(self.my_ip))
-        if cache_output:
-            for line in cache_output.splitlines():
-                parts = line.split()
-                if len(parts) < 2:
-                    continue
-                ip = parts[0].strip("()")
-                try:
-                    if ipaddress.ip_address(ip) not in network:
-                        continue
-                except ValueError:
-                    continue
-                mac = good_mac(parts[1])
-                if re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac):
-                    discovered.setdefault(ip, mac)
-
-        # Resolve names only for devices with a known MAC, avoiding a lengthy
-        # name lookup for every address in the subnet.
-        hostnames = {}
-        previous_socket_timeout = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(1.0)
+        # Read the Windows ARP cache directly, including static entries. Do not
+        # rely on locale-sensitive "findstr dynamic" output.
         try:
+            cache = subprocess.run(
+                ["arp", "-a", "-N", self.my_ip],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=3.0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            cache_output = cache.stdout if cache.returncode == 0 else ""
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[Scanner] Could not read Windows ARP cache: {exc}")
+            cache_output = ""
+
+        for line in cache_output.splitlines():
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            ip = parts[0].strip("()")
+            try:
+                if ipaddress.ip_address(ip) not in network:
+                    continue
+            except ValueError:
+                continue
+
+            mac = good_mac(parts[1])
+            if (
+                re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
+                and mac != GLOBAL_MAC
+            ):
+                discovered.setdefault(ip, mac)
+
+        # Resolve names only for devices whose MAC addresses we actually know.
+        # Every lookup is a process with a timeout, so name discovery cannot
+        # hold the scan thread indefinitely.
+        name_ips = [
+            ip for ip in discovered
+            if ip not in (self.my_ip, self.router_ip)
+        ]
+        hostnames = {}
+        if name_ips:
             with ThreadPoolExecutor(max_workers=16) as executor:
                 futures = {
                     executor.submit(self._resolve_device_name, ip): ip
-                    for ip in discovered
-                    if ip not in (self.my_ip, self.router_ip)
+                    for ip in name_ips
                 }
-                for future in as_completed(futures):
+                for completed, future in enumerate(as_completed(futures), start=1):
                     ip = futures[future]
                     try:
                         hostnames[ip] = future.result() or ""
-                    except Exception:
+                    except Exception as exc:
+                        print(f"[Scanner] Name lookup for {ip} failed: {exc}")
                         hostnames[ip] = ""
-        finally:
-            socket.setdefaulttimeout(previous_socket_timeout)
+                    self.qt_progress_signal(
+                        200 + int(52 * completed / len(name_ips))
+                    )
+        else:
+            self.qt_progress_signal(252)
 
         scan_result = [(ip, mac) for ip, mac in discovered.items()]
         print(
             f"[Scanner] Advanced scan found {len(scan_result)} local devices "
             f"({len(ping_alive)} ICMP responders) on {network}"
         )
+
+        # Commit results before marking the scan complete.
         self.devices_appender(scan_result, hostnames)
+        self.qt_progress_signal(253)
 
     def arp_scan(self):
         """
