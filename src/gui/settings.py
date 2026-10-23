@@ -37,7 +37,6 @@ class Settings(QMainWindow, Ui_MainWindow):
         self.spinThreads.valueChanged.connect(self.sliderThreads.setValue)
         self.btnApply.clicked.connect(self.Apply)
         self.btnDefaults.clicked.connect(self.Defaults)
-        self.btnUpdate.clicked.connect(self.checkUpdate)
     
     def Apply(self, silent_apply=False):
         nicknames = Nicknames()
@@ -48,7 +47,7 @@ class Settings(QMainWindow, Ui_MainWindow):
         is_autostart  =  self.chkAutostart.isChecked()
         is_minimized  =  self.chkMinimized.isChecked()
         is_remember   =  self.chkRemember.isChecked()
-        is_autoupdate =  self.chkAutoupdate.isChecked()
+        is_autoupdate = False  # Legacy settings key; update checks are removed.
         iface         =  self.comboInterface.currentText()
         is_ip_forward =  self.chkIpForwarding.isChecked()
 
@@ -178,7 +177,6 @@ class Settings(QMainWindow, Ui_MainWindow):
         
         self.elmocut.minimize = s['minimized']
         self.elmocut.remember = s['remember']
-        self.elmocut.autoupdate = s['autoupdate']
         self.elmocut.ip_forwarding_enabled = s['ip_forwarding']
         self.elmocut.scanner.device_count = s['count']
         self.elmocut.scanner.max_threads = s['threads']
@@ -187,7 +185,6 @@ class Settings(QMainWindow, Ui_MainWindow):
         self.elmocut.killer.iface = get_iface_by_name(s['iface'])
         
         self.elmocut.setStyleSheet(self.styleSheet())
-        self.elmocut.about_window.setStyleSheet(self.styleSheet())
 
     def currentSettings(self):
         s = import_settings()
@@ -196,7 +193,6 @@ class Settings(QMainWindow, Ui_MainWindow):
         self.chkAutostart.setChecked(s['autostart'])
         self.chkMinimized.setChecked(s['minimized'])
         self.chkRemember.setChecked(s['remember'])
-        self.chkAutoupdate.setChecked(s['autoupdate'])
         self.spinCount.setValue(s['count'])
         self.spinThreads.setValue(s['threads'])
         self.sliderCount.setValue(s['count'])
@@ -210,10 +206,6 @@ class Settings(QMainWindow, Ui_MainWindow):
         self.comboInterface.setCurrentIndex(index * (index >= 0))
         
         self.setStyleSheet(load_stylesheet() if s['dark'] else '')
-    
-    def checkUpdate(self):
-        self.elmocut.update_thread.prompt_if_latest = True
-        self.elmocut.update_thread.start()
     
     def loadInterfaces(self):
         self.comboInterface.clear()
