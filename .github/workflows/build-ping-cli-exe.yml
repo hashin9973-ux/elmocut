@@ -1,0 +1,56 @@
+name: Temporary Windows EXE build
+
+on:
+  push:
+    branches:
+      - feature/ping-cli-entrypoint
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check Python syntax
+        run: python -m py_compile src/elmocut.py
+
+      - name: Install Python dependencies and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+
+      - name: Build ElmoCut executable and installer
+        shell: pwsh
+        run: |
+          @('', '1.1.1', '') | python build.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $app = Get-ChildItem -Path output -Filter elmoCut.exe -Recurse | Select-Object -First 1
+          if (-not $app) { throw "elmoCut.exe not found in build output" }
+          $qtNetworkDll = Get-ChildItem -Path $app.Directory.FullName -Filter Qt6Network.dll -Recurse
+          if (-not $qtNetworkDll) { throw "Qt6Network.dll missing from packaged app" }
+          $qtNetworkExt = Get-ChildItem -Path $app.Directory.FullName -Filter QtNetwork.pyd -Recurse
+          if (-not $qtNetworkExt) { throw "QtNetwork.pyd missing from packaged app" }
+          Get-ChildItem -Recurse output
+          Get-ChildItem -File *.exe
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: elmocut-atlas-visible-window-fix
+          path: |
+            output/**
+            elmoCut* x64.exe
+          if-no-files-found: error
+          retention-days: 7
