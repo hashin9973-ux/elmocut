@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scapy.all import arping, ARP, Ether, srp
 from time import sleep
+import errno
 import ipaddress
 import re
 import socket
@@ -328,8 +329,8 @@ class Scanner():
 
     def advanced_scan(self):
         """
-        Discover devices across the local /24 using ARP and ICMP, then enrich
-        known MAC addresses with bounded NetBIOS/reverse-name lookups.
+        Discover local devices using ARP, repeated ICMP, common TCP service
+        probes, Windows neighbour-cache data, and bounded hostname lookups.
         """
         self.init()
         try:
@@ -423,34 +424,38 @@ class Scanner():
                     print(f"[Scanner] Ping task for {ip} failed: {exc}")
                 self.qt_progress_signal(min(140, int(140 * completed / len(target_ips))))
 
-        # Probe common Windows, server, printer, camera and web ports. An open
-        # TCP port is positive evidence of a live host even when ICMP is blocked.
-        tcp_ports = (80, 443, 445, 139, 22, 3389, 8080, 554, 9100)
+        # Probe common Windows, server, printer, camera and web services.
+        # A successful connection OR a TCP refusal is evidence of a live host
+        # even when ICMP is blocked (a refusal means the host sent a TCP RST).
+        tcp_ports = (21, 22, 23, 53, 80, 135, 139, 443, 445, 554, 3389, 5900, 8080, 9100)
 
-        def tcp_target(ip):
-            for port in tcp_ports:
-                try:
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
-                        connection.settimeout(0.22)
-                        if connection.connect_ex((ip, port)) == 0:
-                            return True
-                except OSError:
-                    continue
-            return False
+        def tcp_port_open(ip, port):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                    connection.settimeout(0.22)
+                    result = connection.connect_ex((ip, port))
+                    return result == 0 or result in (errno.ECONNREFUSED, 10061)
+            except OSError:
+                return False
 
         tcp_alive = set()
-        with ThreadPoolExecutor(max_workers=64) as executor:
-            futures = {executor.submit(tcp_target, ip): ip for ip in target_ips}
+        port_targets = [(ip, port) for ip in target_ips for port in tcp_ports]
+        with ThreadPoolExecutor(max_workers=128) as executor:
+            futures = {
+                executor.submit(tcp_port_open, ip, port): (ip, port)
+                for ip, port in port_targets
+            }
             for completed, future in enumerate(as_completed(futures), start=1):
-                ip = futures[future]
+                ip, port = futures[future]
                 try:
                     if future.result():
                         tcp_alive.add(ip)
                 except Exception as exc:
-                    print(f"[Scanner] TCP probe for {ip} failed: {exc}")
-                self.qt_progress_signal(
-                    140 + int(70 * completed / len(target_ips))
-                )
+                    print(f"[Scanner] TCP probe for {ip}:{port} failed: {exc}")
+                if completed % len(tcp_ports) == 0 or completed == len(port_targets):
+                    self.qt_progress_signal(
+                        140 + int(70 * completed / len(port_targets))
+                    )
 
         responsive_ips = ping_alive | tcp_alive | set(discovered.keys())
 
