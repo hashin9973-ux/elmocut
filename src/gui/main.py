@@ -8,7 +8,6 @@ from PyQt6.QtCore import Qt
 from ui.ui_main import Ui_MainWindow
 
 from gui.settings import Settings
-from gui.about import About
 from gui.device import DeviceWindow
 
 from networking.scanner import Scanner
@@ -21,7 +20,7 @@ from tools.utils import goto, is_connected
 
 from assets import *
 
-from bridge import ScanThread, UpdateThread
+from bridge import ScanThread
 
 from constants import *
 import os
@@ -54,7 +53,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         # Settings props
         self.minimize = True
         self.remember = False
-        self.autoupdate = True
         self.ip_forwarding_enabled = False
 
         self.from_tray = False
@@ -62,14 +60,12 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         # Threading
         self.scan_thread = ScanThread()
         self.scan_thread.thread_finished.connect(self.ScanThread_Reciever)
+        self.scan_thread.scan_error.connect(self.ScanThread_Error)
         self.scan_thread.progress.connect(self.pgbar.setValue)
 
-        self.update_thread = UpdateThread()
-        self.update_thread.thread_finished.connect(self.UpdateThread_Reciever)
         
         # Initialize other sub-windows
         self.settings_window = Settings(self, self.icon)
-        self.about_window = About(self, self.icon)
         self.device_windows: dict[str, DeviceWindow] = {}
 
         # Connect buttons
@@ -82,7 +78,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             (self.btnKillAll,    self.killAll,       killall_icon,    'Kill all devices'),
             (self.btnUnkillAll,  self.unkillAll,     unkillall_icon,  'Un-kill all devices'),
             (self.btnSettings,   self.openSettings,  settings_icon,   'View elmoCut settings'),
-            (self.btnAbout,      self.openAbout,     about_icon,      'About elmoCut')
         ] 
         
         for btn, btn_func, btn_icon, btn_tip in self.buttons:
@@ -186,14 +181,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.settings_window.show()
         self.settings_window.setWindowState(Qt.WindowState.WindowNoState)
 
-    def openAbout(self):
-        """
-        Open about window
-        """
-        self.about_window.hide()
-        self.about_window.show()
-        self.about_window.setWindowState(Qt.WindowState.WindowNoState)
-
     def applySettings(self):
         """
         Apply saved settings
@@ -241,13 +228,11 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         """
         self.hide()
         self.settings_window.hide()
-        self.about_window.hide()
 
     def quit_all(self):
         self.stop_all_watching() 
         self.killer.unkill_all()
         self.settings_window.close()
-        self.about_window.close()
         for window in list(self.device_windows.values()):
             window.close()
         self.tray_icon.hide()
@@ -652,54 +637,19 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.scan_thread.scan_type = scan_type
         self.scan_thread.start()
 
-    def ScanThread_Reciever(self):
+    def ScanThread_Reciever(self, success=True):
         """
-        Scan Thread results reciever
+        Re-enable the UI after every scan and only refresh results on success.
         """
         self.centralwidget.setEnabled(True)
         self.pgbar.setVisible(False)
-        self.processDevices()
-    
-    def UpdateThread_Starter(self):
-        """
-        Update Thread starter
-        """
-        if self.autoupdate:
-            self.update_thread.prompt_if_latest = False
-            self.update_thread.start()
+        if success:
+            self.processDevices()
+        else:
+            self.log('Scan failed. See console output for details.', 'red')
 
-    def UpdateThread_Reciever(self):
-        """
-        Update Thread reciever
-        """
-        new_version = self.update_thread.github_version
-        update_url = self.update_thread.url
+    def ScanThread_Error(self, message):
+        QMessageBox.critical(self, 'Scan Failed', message)
 
-        if self.update_thread.check_failed:
-            if self.update_thread.prompt_if_latest:
-                return MsgType.WARN(self, 'Update Check Failed',
-                            'Could not reach GitHub to check for updates.\n'
-                            'Check your internet connection and try again.')
-        
-        elif new_version == 'None':
-            return
-        
-        elif new_version != VERSION:
-            if MsgType.INFO(
-                self,
-                'elmoCut Update Available',
-                'A new version is available.\n'
-                f'Do you want to download {new_version}?',
-                Buttons.YES | Buttons.NO
-            ) == Buttons.YES:
-                goto(update_url)
-        
-        elif new_version == VERSION and self.update_thread.prompt_if_latest:
-            MsgType.INFO(
-                self.settings_window,
-                'Check for update',
-                'You have the latest version installed.'
-            )
-    
     # Open BuyMeACoffee page
     buymeacoffee = lambda self: goto('https://www.buymeacoffee.com/elmoiv')
