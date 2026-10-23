@@ -269,9 +269,7 @@ if __name__ == "__main__":
                 GUI.killer.iface = GUI.scanner.iface
                 startup_log("Synchronizing IP forwarding state")
                 GUI.sync_ip_forwarding_state()
-                startup_log("Flushing ARP cache")
-                GUI.scanner.flush_arp()
-                startup_log("ARP cache flush completed")
+                startup_log("Preserving ARP cache for discovery")
 
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
