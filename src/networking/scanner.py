@@ -126,7 +126,7 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
-    def devices_appender(self, scan_result, hostnames=None, mark_missing_offline=False):
+    def devices_appender(self, scan_result, hostnames=None, mark_missing_offline=False, port_results=None):
         """
         Merge discovered devices without treating a weak scan as proof that
         previously known devices went offline.
@@ -137,6 +137,8 @@ class Scanner():
         """
         nicknames = Nicknames()
         hostnames = hostnames or {}
+        has_port_results = port_results is not None
+        port_results = port_results or {}
         previous_devices = {
             device.mac: device for device in self.devices
             if not device.admin and device.mac
@@ -214,6 +216,11 @@ class Scanner():
                     vendor=get_vendor(mac),
                     dtype=DeviceType.USER,
                     hostname=hostname,
+                    open_ports=(
+                        sorted(set(port_results.get(ip, [])))
+                        if has_port_results
+                        else list(getattr(previous, 'open_ports', [])) if previous is not None else []
+                    ),
                     name=nickname,
                     admin=False,
                     online=True
@@ -434,11 +441,16 @@ class Scanner():
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
                     connection.settimeout(0.22)
                     result = connection.connect_ex((ip, port))
-                    return result == 0 or result in (errno.ECONNREFUSED, 10061)
+                    if result == 0:
+                        return "open"
+                    if result in (errno.ECONNREFUSED, 10061):
+                        return "responsive"
+                    return ""
             except OSError:
-                return False
+                return ""
 
         tcp_alive = set()
+        open_ports_by_ip = {}
         port_targets = [(ip, port) for ip in target_ips for port in tcp_ports]
         with ThreadPoolExecutor(max_workers=128) as executor:
             futures = {
@@ -448,8 +460,11 @@ class Scanner():
             for completed, future in enumerate(as_completed(futures), start=1):
                 ip, port = futures[future]
                 try:
-                    if future.result():
+                    probe_status = future.result()
+                    if probe_status:
                         tcp_alive.add(ip)
+                    if probe_status == "open":
+                        open_ports_by_ip.setdefault(ip, []).append(port)
                 except Exception as exc:
                     print(f"[Scanner] TCP probe for {ip}:{port} failed: {exc}")
                 if completed % len(tcp_ports) == 0 or completed == len(port_targets):
@@ -554,7 +569,12 @@ class Scanner():
         )
 
         # Commit results before marking the scan complete.
-        self.devices_appender(scan_result, hostnames, mark_missing_offline=True)
+        self.devices_appender(
+            scan_result,
+            hostnames,
+            mark_missing_offline=True,
+            port_results=open_ports_by_ip
+        )
         self.qt_progress_signal(253)
 
     def arp_scan(self):
