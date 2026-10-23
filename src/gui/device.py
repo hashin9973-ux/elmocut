@@ -103,7 +103,8 @@ class DeviceWindow(QMainWindow, Ui_MainWindow):
             self.btnStopWatch.setEnabled(False)
             self.btnStartWatch.setEnabled(True)
             return
-        print(f"[DeviceWindow] Data received from {self.device.name} ({self.device.ip}): {hostname}")
+        display_name = self.device.name if self.device.name not in ("", "-") else (self.device.hostname or self.device.ip)
+        print(f"[DeviceWindow] Data received from {display_name} ({self.device.ip}): {hostname}")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         # Callback will be always calling i want the table to show max of
@@ -128,7 +129,8 @@ class DeviceWindow(QMainWindow, Ui_MainWindow):
             self.elmocut.showDevices()
     
     def load(self, device, current_row):
-        self.setWindowTitle(f'elmoCut - {device.name or device.ip} ({device.ip})')
+        display_name = device.name if device.name not in ("", "-") else (device.hostname or device.ip)
+        self.setWindowTitle(f'elmoCut - {display_name} ({device.ip})')
         self.lblIP.setText(device.ip)
         self.lblMAC.setText(device.mac)
         if device.name != '-':
