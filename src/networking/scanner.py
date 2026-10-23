@@ -3,6 +3,8 @@ from scapy.all import arping, ARP, Ether, srp
 from time import sleep
 import errno
 import ipaddress
+import json
+import os
 import re
 import socket
 import subprocess
@@ -31,7 +33,92 @@ class Scanner():
         self.perfix = None
         self.qt_progress_signal = int
         self.qt_log_signal = print
-    
+        # Keep an inventory between launches so a device that is unavailable
+        # during a scan is still listed as last-known inventory, not erased.
+        self._inventory_path = os.path.join(
+            DOCUMENTS_PATH, "network_inventory.json"
+        )
+        self._load_inventory()
+
+    def _load_inventory(self):
+        """Restore last-known devices as unavailable until current evidence confirms them."""
+        try:
+            with open(self._inventory_path, "r", encoding="utf-8") as inventory:
+                records = json.load(inventory)
+        except (OSError, ValueError, TypeError):
+            return
+
+        nicknames = Nicknames()
+        restored = {}
+        if not isinstance(records, list):
+            return
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            try:
+                ip = str(ipaddress.IPv4Address(record.get("ip", "")))
+            except (ValueError, TypeError):
+                continue
+            mac = good_mac(str(record.get("mac", "")))
+            if (
+                not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
+                or mac == GLOBAL_MAC
+            ):
+                continue
+
+            # The nickname settings database is authoritative. Do not revive
+            # an old alias from inventory after the user has reset that alias.
+            nickname = nicknames.get_name(mac)
+            if nickname in ("", None):
+                nickname = "-"
+            open_ports = record.get("open_ports", [])
+            if not isinstance(open_ports, list):
+                open_ports = []
+            restored[mac] = Device(
+                ip=ip,
+                mac=mac,
+                vendor=str(record.get("vendor") or get_vendor(mac)),
+                dtype=DeviceType.USER,
+                hostname=str(record.get("hostname") or ""),
+                open_ports=[
+                    port for port in open_ports
+                    if isinstance(port, int) and 1 <= port <= 65535
+                ],
+                name=nickname,
+                admin=False,
+                online=False,
+            )
+        if restored:
+            self.devices = list(restored.values())
+            self.old_ips = {device.mac: device.ip for device in self.devices}
+
+    def _save_inventory(self):
+        """Atomically persist known user devices; never persist them as currently online."""
+        records = []
+        seen_macs = set()
+        for device in self.devices:
+            if device.admin or not device.mac:
+                continue
+            mac = good_mac(device.mac)
+            if mac in seen_macs or mac == GLOBAL_MAC:
+                continue
+            seen_macs.add(mac)
+            records.append({
+                "ip": device.ip,
+                "mac": mac,
+                "vendor": device.vendor,
+                "hostname": device.hostname,
+                "open_ports": list(getattr(device, "open_ports", [])),
+            })
+        try:
+            os.makedirs(os.path.dirname(self._inventory_path), exist_ok=True)
+            temp_path = self._inventory_path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as inventory:
+                json.dump(records[-4096:], inventory, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self._inventory_path)
+        except (OSError, TypeError, ValueError) as exc:
+            print(f"[Scanner] Could not persist device inventory: {exc}")
+
     def generate_ips(self):
         self.ips = [f'{self.perfix}.{i}' for i in range(1, self.device_count)]
 
@@ -297,6 +384,7 @@ class Scanner():
         self.old_ips = {d.mac: d.ip for d in self.devices if d.mac}
         self.add_me()
         self.add_router()
+        self._save_inventory()
 
         print(
             f"Scanner found {len(self.devices)} devices "
