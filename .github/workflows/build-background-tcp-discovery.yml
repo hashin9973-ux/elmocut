@@ -1,4 +1,4 @@
-name: Build ElmoCut background ping and advanced discovery
+name: Build ElmoCut background ping, TCP discovery and service list
 
 on:
   push:
