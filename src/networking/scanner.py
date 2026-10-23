@@ -21,6 +21,8 @@ class Scanner():
         self.max_threads = 8
         self.__ping_done = 0
         self.devices = []
+        # Count only credible advanced scans that miss a known device.
+        self.missed_advanced_scans = {}
         self.old_ips = {}
         self.router = {}
         self.ips = []
@@ -123,10 +125,14 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
-    def devices_appender(self, scan_result, hostnames=None):
+    def devices_appender(self, scan_result, hostnames=None, mark_missing_offline=False):
         """
-        Refresh active devices while retaining previously known devices that
-        no longer answer. Retained records stay selectable and are marked offline.
+        Merge discovered devices without treating a weak scan as proof that
+        previously known devices went offline.
+
+        Basic scans never mark absent devices offline because their discovery
+        methods have different coverage. Advanced scans must repeatedly produce
+        a credible result before an absent device is shown as unavailable.
         """
         nicknames = Nicknames()
         hostnames = hostnames or {}
@@ -134,22 +140,48 @@ class Scanner():
             device.mac: device for device in self.devices
             if not device.admin and device.mac
         }
+        previous_online_macs = {
+            mac for mac, device in previous_devices.items()
+            if getattr(device, "online", True)
+        }
+
+        # Validate input before using it to decide whether a scan was complete.
+        # Empty, malformed, or MAC-less results are not evidence of absence.
+        clean_results = []
+        for entry in scan_result or []:
+            if not isinstance(entry, (tuple, list)) or len(entry) < 2:
+                continue
+            ip = str(entry[0]).strip("()")
+            try:
+                parsed_ip = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if parsed_ip.version != 4 or ip in (self.router_ip, self.my_ip):
+                continue
+
+            mac = good_mac(str(entry[1]))
+            if (
+                not re.fullmatch(r"(?:[0-9A-F]{2}:){5}[0-9A-F]{2}", mac)
+                or mac == GLOBAL_MAC
+            ):
+                continue
+            clean_results.append((ip, mac, entry))
+
+        clean_results.sort(key=lambda item: int(item[0].rsplit(".", 1)[-1]))
+        discovered_macs = {mac for _, mac, _ in clean_results}
+        previously_known_hits = len(previous_online_macs & discovered_macs)
+        required_known_hits = max(1, (len(previous_online_macs) + 1) // 2)
+        credible_advanced_result = (
+            mark_missing_offline
+            and previously_known_hits >= required_known_hits
+        )
 
         self.devices = []
         seen_macs = set()
         active_macs = set()
 
-        # Sort by the last IPv4 octet for a stable table.
-        scan_result = sorted(
-            scan_result,
-            key=lambda item: int(str(item[0]).strip("()").split(".")[-1])
-        )
-
-        for entry in scan_result:
-            if len(entry) < 2:
-                continue
-            ip, mac = str(entry[0]).strip("()"), good_mac(str(entry[1]))
-            if ip in [self.router_ip, self.my_ip] or mac in seen_macs:
+        for ip, mac, entry in clean_results:
+            if mac in seen_macs:
                 continue
 
             seen_macs.add(mac)
@@ -157,9 +189,15 @@ class Scanner():
             previous = previous_devices.get(mac)
             self.old_ips[mac] = ip
 
+            # Persisted user nicknames always win. If a legacy/corrupt MAC key
+            # prevented lookup, retain the in-memory custom nickname as fallback.
             nickname = nicknames.get_name(mac)
-            if nickname == "-" and previous is not None:
-                nickname = previous.name
+            if nickname in ("", None, "-") and previous is not None:
+                previous_name = getattr(previous, "name", "-")
+                if previous_name not in ("", None, "-"):
+                    nickname = previous_name
+            if nickname in ("", None):
+                nickname = "-"
 
             hostname = hostnames.get(ip, "")
             if not hostname and len(entry) > 2:
@@ -167,6 +205,7 @@ class Scanner():
             if not hostname and previous is not None:
                 hostname = previous.hostname
 
+            self.missed_advanced_scans[mac] = 0
             self.devices.append(
                 Device(
                     ip=ip,
@@ -180,35 +219,47 @@ class Scanner():
                 )
             )
 
-        # Retain disappeared devices with their last-known details. This does
-        # not disable row selection or the existing device actions.
+        # A device must be absent from three credible advanced sweeps before
+        # it is greyed out. Zero-result and low-coverage scans do not count.
         for mac, device in previous_devices.items():
             if mac not in active_macs:
-                device.online = False
+                if credible_advanced_result:
+                    misses = self.missed_advanced_scans.get(mac, 0) + 1
+                    self.missed_advanced_scans[mac] = misses
+                    if misses >= 3:
+                        device.online = False
                 self.devices.append(device)
 
-        # Also retain any watched device not yet represented in the last scan.
+        # Retain watched devices that are not in Scanner.devices yet.
         for mac in set(self.parent.watched_devices.keys()) - active_macs:
             if mac in previous_devices:
                 continue
             window = self.parent.device_windows.get(mac)
             if window and window.device:
-                window.device.online = False
+                if credible_advanced_result:
+                    misses = self.missed_advanced_scans.get(mac, 0) + 1
+                    self.missed_advanced_scans[mac] = misses
+                    if misses >= 3:
+                        window.device.online = False
                 self.devices.append(window.device)
 
-        # Keep the mapping for active and retained devices so an IP change for a
-        # known MAC is handled on the next scan.
+        # Keep mappings for active and retained devices so IP changes remain
+        # associated with the same MAC address on subsequent scans.
         self.old_ips = {d.mac: d.ip for d in self.devices if d.mac}
 
         self.add_me()
         self.add_router()
 
-        print(f'Scanner found {len(self.devices)} devices: {self.devices}')
+        print(
+            f"Scanner found {len(self.devices)} devices "
+            f"({len(active_macs)} discovered user MACs; "
+            f"credible advanced result={credible_advanced_result}): {self.devices}"
+        )
 
-        # Clear the ARP cache after results have been captured.
+        # Clear the ARP cache only after some devices were captured.
         if active_macs:
             self.flush_arp()
-    
+
     def arping_cache(self):
         """
         Showing system arp cache after pinging
@@ -409,7 +460,7 @@ class Scanner():
         )
 
         # Commit results before marking the scan complete.
-        self.devices_appender(scan_result, hostnames)
+        self.devices_appender(scan_result, hostnames, mark_missing_offline=True)
         self.qt_progress_signal(253)
 
     def arp_scan(self):
