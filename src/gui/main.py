@@ -325,7 +325,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.stop_all_watching()
         self.killer.unkill_all()
         self.settings_window.close()
-        self.about_window.close()
 
         for window in list(self.device_windows.values()):
             window.close()
