@@ -1,9 +1,10 @@
 from PyQt6.QtCore import QThread, pyqtSignal
-from requests import get
+import traceback
 
 class ScanThread(QThread):
-    # Progress Bar value signal
+    # Progress and lifecycle signals are emitted even when the scan fails.
     progress = pyqtSignal(int)
+    scan_error = pyqtSignal(str)
     thread_finished = pyqtSignal(bool)
 
     def __init__(self):
@@ -14,16 +15,23 @@ class ScanThread(QThread):
 
     def run(self):
         # 0 = arping, 1 = the existing ping scan, 2 = advanced discovery.
-        if self.scan_type == 0:
-            self.easy()
-        elif self.scan_type == 1:
-            self.hard()
-        elif self.scan_type == 2:
-            self.advanced()
+        try:
+            if self.scan_type == 0:
+                self.easy()
+            elif self.scan_type == 1:
+                self.hard()
+            elif self.scan_type == 2:
+                self.advanced()
+            else:
+                raise ValueError(f"Unknown scan type: {self.scan_type!r}")
+        except Exception as exc:
+            details = traceback.format_exc()
+            print(f"[ScanThread] Scan failed: {details}")
+            self.scan_error.emit(f"{type(exc).__name__}: {exc}")
+            self.thread_finished.emit(False)
+        else:
+            self.thread_finished.emit(True)
 
-        # Emit show devices func to the thread finished receiver.
-        self.thread_finished.emit(True)
-    
     def easy(self):
         # Fake progress cause Scapy can't handle QThread Signals
         self.scanner.arp_scan()
