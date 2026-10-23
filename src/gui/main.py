@@ -104,6 +104,10 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tableScan.setColumnCount(len(TABLE_HEADER_LABELS))
         self.tableScan.verticalHeader().setVisible(False)
         self.tableScan.setHorizontalHeaderLabels(TABLE_HEADER_LABELS)
+        # Let all seven columns fit in the available viewport. The generated UI
+        # sets a 170 px minimum per section, which clips the right-hand columns
+        # (including Nickname) on the default 870 px window.
+        self.tableScan.horizontalHeader().setMinimumSectionSize(64)
         self.tableScan.setShowGrid(False)
         # self.tableScan.setStyleSheet("QTableWidget::item { border: none; }")
 
@@ -302,12 +306,17 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         return True
 
     def resizeEvent(self, event=True):
-        """
-        Auto resize table widget columns dynamically
-        """
-        label_count = len(TABLE_HEADER_LABELS)
-        for i in range(label_count):
-            self.tableScan.setColumnWidth(i, self.tableScan.width() // label_count)
+        """Resize columns proportionally so the Nickname column stays visible."""
+        if not hasattr(self, "tableScan"):
+            return
+        weights = (0.95, 1.22, 1.00, 0.68, 1.28, 1.10, 1.37)
+        available = max(0, self.tableScan.viewport().width())
+        total_weight = sum(weights)
+        widths = [int(available * weight / total_weight) for weight in weights]
+        if widths:
+            widths[-1] += available - sum(widths)
+        for column, width in enumerate(widths):
+            self.tableScan.setColumnWidth(column, max(64, width))
 
     def closeEvent(self, event):
         """
@@ -354,18 +363,16 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         return self.scanner.devices[self.tableScan.currentRow()]
     
     def cellClicked(self, row, column):
-        """
-        Copy selected cell data to clipboard
-        """
-        # Get current row
+        """Copy the exact displayed cell value to the clipboard."""
         device = self.current_index()
+        values = self.device_table_values(device)
+        if not 0 <= column < len(values):
+            return
+        cell = str(values[column])
 
-        # Get cell text using dict.values instead of .itemAt()
-        cell = str(list(device.to_dict().values())[column])
-        
         if len(cell) > 20:
             cell = cell[:20] + '...'
-        
+
         self.lblcenter.setText(cell)
         copy(cell)
 
@@ -420,9 +427,33 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.tableScan.setItem(row, column, ql)
 
+    @staticmethod
+    def device_table_values(device):
+        """Return values in the same explicit order as TABLE_HEADER_LABELS."""
+        port_names = {
+            21: 'FTP', 22: 'SSH', 23: 'Telnet', 53: 'DNS',
+            80: 'HTTP', 135: 'RPC', 139: 'NetBIOS', 443: 'HTTPS',
+            445: 'SMB', 554: 'RTSP', 3389: 'RDP', 5900: 'VNC',
+            8080: 'HTTP-alt', 9100: 'Printer'
+        }
+        dtype = getattr(device.type, 'value', device.type)
+        nickname = device.name if device.name not in ('', None, '-') else '-'
+        return [
+            device.ip,
+            device.mac,
+            device.vendor,
+            dtype,
+            device.hostname or '-',
+            ', '.join(
+                f'{port}/{port_names.get(port, "TCP")}'
+                for port in getattr(device, 'open_ports', [])
+            ) or '-',
+            nickname,
+        ]
+
     def fillTableRow(self, row, device: Device):
-        # Preserve active state colours, especially the red killed state.
-        # Unavailable devices only have dimmed text; no grey row background.
+        # Preserve state backgrounds and their contrast. For ordinary
+        # unavailable rows, use a clear text-only fade rather than a grey fill.
         if device.admin:
             colors = ['#00ff00', '#000000']
         elif device.mac in self.watched_devices:
@@ -432,23 +463,11 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         else:
             colors = None
 
-        foreground = '#b5b5b5' if not device.online else None
-        props = device.to_dict()
-        props.pop('admin', None)
-        props.pop('online', None)
-
-        port_names = {
-            21: 'FTP', 22: 'SSH', 23: 'Telnet', 53: 'DNS',
-            80: 'HTTP', 135: 'RPC', 139: 'NetBIOS', 443: 'HTTPS',
-            445: 'SMB', 554: 'RTSP', 3389: 'RDP', 5900: 'VNC',
-            8080: 'HTTP-alt', 9100: 'Printer'
-        }
-        for column, (key, prop) in enumerate(props.items()):
-            if key == 'open_ports':
-                prop = ', '.join(
-                    f'{port}/{port_names.get(port, "TCP")}' for port in prop
-                ) or '-'
-            self.fillTableCell(row, column, prop, colors, foreground)
+        # #747474 is deliberately stronger than the previous #b5b5b5, which
+        # was too subtle against the dark table. Keep status-coloured rows crisp.
+        foreground = '#747474' if not device.online and colors is None else None
+        for column, value in enumerate(self.device_table_values(device)):
+            self.fillTableCell(row, column, value, colors, foreground)
 
     def showDevices(self):
         """
