@@ -20,6 +20,13 @@ class Killer:
             print(victim.mac, 'is already killed.')
             return
 
+        # An offline row can be marked as killed so the user's requested state
+        # is retained, but do not transmit using stale IP/MAC information.
+        if not getattr(victim, 'online', True):
+            self.killed[victim.mac] = victim
+            print(f'[Killer] Queued {victim.mac}; it will be applied when the device returns.')
+            return
+
         if self.iface.name == 'NULL':
             print(f'[Killer] Refusing to kill {victim.mac} — no valid interface resolved.')
             return
@@ -81,6 +88,12 @@ class Killer:
         Unspoofing victim - Restore ARP cache to original state
         """
         self.killed.pop(victim.mac, None)  # Safe pop with default
+
+        # Offline records remain actionable, but stale addresses must not be
+        # used to send restoration packets to a possibly different host.
+        if not getattr(victim, 'online', True):
+            print(f'[Killer] Cleared queued kill state for offline device {victim.mac}.')
+            return
 
         # Fix Victim: Tell victim the router's REAL MAC
         to_victim = Ether(dst=victim.mac)/ARP(
@@ -144,21 +157,30 @@ class Killer:
 
     def rekill_stored(self, new_devices: list[Device], exclude_macs: set = frozenset()):
         """
-        Re-kill old devices in self.storage
+        Restore prior kill state, but only transmit poison packets to devices
+        that are currently reachable. Offline entries retain the queued state.
         """
+        by_mac = {device.mac: device for device in new_devices}
         for _, old in self.storage.items():
-            for new in new_devices:
-                # Update old killed with newer ip
-                if old.mac == new.mac:
-                    old.ip = new.ip
-                    break
-
-            # Update new_devices with those it does not have
-            if all(old.mac != new.mac for new in new_devices):
-                print(f'Updating with old device: {old}')
+            current = by_mac.get(old.mac)
+            if current is None:
+                old.online = False
+                print(f'Updating with offline device: {old}')
                 new_devices.append(old)
+                by_mac[old.mac] = old
+                current = old
+            else:
+                # Keep the stored state aligned with the latest discovered row.
+                old.ip = current.ip
+                old.hostname = getattr(current, 'hostname', '')
+                old.name = current.name
+                old.online = current.online
 
             if old.mac in exclude_macs:
                 continue
 
-            self.kill(old)
+            if not current.online:
+                self.killed[current.mac] = current
+                continue
+
+            self.kill(current)
