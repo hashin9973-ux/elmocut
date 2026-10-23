@@ -222,12 +222,7 @@ class Scanner():
             pass
 
         try:
-            previous_timeout = socket.getdefaulttimeout()
-            socket.setdefaulttimeout(1.0)
-            try:
-                return socket.gethostbyaddr(ip)[0].rstrip(".").split(".")[0]
-            finally:
-                socket.setdefaulttimeout(previous_timeout)
+            return socket.gethostbyaddr(ip)[0].rstrip(".").split(".")[0]
         except (OSError, socket.herror, socket.gaierror):
             return ""
 
@@ -314,18 +309,23 @@ class Scanner():
         # Resolve names only for devices with a known MAC, avoiding a lengthy
         # name lookup for every address in the subnet.
         hostnames = {}
-        with ThreadPoolExecutor(max_workers=16) as executor:
-            futures = {
-                executor.submit(self._resolve_device_name, ip): ip
-                for ip in discovered
-                if ip not in (self.my_ip, self.router_ip)
-            }
-            for future in as_completed(futures):
-                ip = futures[future]
-                try:
-                    hostnames[ip] = future.result() or ""
-                except Exception:
-                    hostnames[ip] = ""
+        previous_socket_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(1.0)
+        try:
+            with ThreadPoolExecutor(max_workers=16) as executor:
+                futures = {
+                    executor.submit(self._resolve_device_name, ip): ip
+                    for ip in discovered
+                    if ip not in (self.my_ip, self.router_ip)
+                }
+                for future in as_completed(futures):
+                    ip = futures[future]
+                    try:
+                        hostnames[ip] = future.result() or ""
+                    except Exception:
+                        hostnames[ip] = ""
+        finally:
+            socket.setdefaulttimeout(previous_socket_timeout)
 
         scan_result = [(ip, mac) for ip, mac in discovered.items()]
         print(
