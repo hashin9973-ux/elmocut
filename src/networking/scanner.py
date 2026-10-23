@@ -365,6 +365,35 @@ class Scanner():
         except Exception as exc:
             print(f"[Scanner] Advanced ARP discovery failed: {exc}")
 
+        # If the direct srp sweep is empty or misses most previously online
+        # devices, retry with the same Scapy arping path used by Easy Scan.
+        # The two paths are similar but can behave differently across Windows
+        # adapters/Npcap versions, so combine their answers instead of trusting
+        # a single intermittently weak sweep.
+        previous_online_macs = {
+            device.mac for device in self.devices
+            if not device.admin and getattr(device, "online", True) and device.mac
+        }
+        known_found = len(previous_online_macs.intersection(discovered.values()))
+        should_retry_arp = not discovered or (
+            bool(previous_online_macs)
+            and known_found < max(1, (len(previous_online_macs) + 1) // 2)
+        )
+        if should_retry_arp:
+            try:
+                fallback_result = arping(
+                    f"{self.router_ip}/24",
+                    iface=self.iface.name,
+                    verbose=0,
+                    timeout=2
+                )
+                for _, received in fallback_result[0]:
+                    ip, mac = received.psrc, good_mac(received.src)
+                    if ip and mac and mac != GLOBAL_MAC:
+                        discovered.setdefault(ip, mac)
+            except Exception as exc:
+                print(f"[Scanner] Fallback arping discovery failed: {exc}")
+
         # Ping the complete subnet with bounded concurrency and no visible
         # console windows. These replies also warm the Windows neighbor cache.
         def ping_target(ip):
