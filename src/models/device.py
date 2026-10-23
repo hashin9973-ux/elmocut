@@ -7,8 +7,6 @@ class Device:
         self.hostname = kwargs.get('hostname', '')
         self.name = kwargs['name']
         self.admin = kwargs['admin']
-        # Online status is refreshed by every scan. Older records remain
-        # selectable but are visually marked as unavailable.
         self.online = kwargs.get('online', True)
 
     def __str__(self):
