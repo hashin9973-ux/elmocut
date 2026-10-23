@@ -47,24 +47,3 @@ class ScanThread(QThread):
         # The advanced scanner reports progress for the entire IPv4 /24 sweep.
         self.scanner.qt_progress_signal = self.progress.emit
         self.scanner.advanced_scan()
-
-class UpdateThread(QThread):
-    thread_finished = pyqtSignal(bool)
-
-    def __init__(self):
-        QThread.__init__(self)
-        self.prompt_if_latest = True
-        self.github_version = 'None'
-        self.check_failed = False
-        self.url = 'https://github.com/elmoiv/elmocut/releases/latest'
-
-    def run(self):
-        self.check_failed = False
-        try:
-            redirect = get(self.url, timeout=5)
-            self.github_version = redirect.url.split('/')[-1]
-        except Exception as e:
-            print('Error at Update Thread:', e)
-            self.check_failed = True
-
-        self.thread_finished.emit(True)
