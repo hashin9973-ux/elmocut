@@ -60,15 +60,20 @@ IPC_HOST = "127.0.0.1"
 IPC_PORT = 47653
 
 
-def send_ping_to_existing_instance():
-    """Forward --ping to an existing instance before requesting elevation."""
+def send_command_to_existing_instance(command):
+    """Forward a local CLI command to an existing GUI before requesting elevation."""
     try:
         with socket.create_connection((IPC_HOST, IPC_PORT), timeout=0.5) as client:
             client.settimeout(1.5)
-            client.sendall(b"PING\n")
+            client.sendall((command + "\\n").encode("ascii"))
             return client.recv(32).strip() == b"OK"
     except OSError:
         return False
+
+
+def send_ping_to_existing_instance():
+    """Forward --ping to an existing instance before requesting elevation."""
+    return send_command_to_existing_instance("PING")
 
 
 def is_admin():
@@ -112,6 +117,12 @@ if __name__ == "__main__":
             startup_log("Existing GUI acknowledged --ping; exiting launcher")
             exit(0)
         startup_log("No existing GUI acknowledged --ping")
+    elif "--background" in argv:
+        startup_log("Checking for an existing GUI instance for background mode")
+        if send_command_to_existing_instance("BACKGROUND"):
+            startup_log("Existing GUI switched to background; exiting launcher")
+            exit(0)
+        startup_log("No existing GUI acknowledged background mode")
 
     # Request elevation only if a new main application instance is needed.
     startup_log("Checking administrator token")
@@ -230,6 +241,11 @@ if __name__ == "__main__":
                     if command == b"PING":
                         connection.write(b"OK\n")
                         QTimer.singleShot(0, run_ping_scan_when_idle)
+                    elif command == b"BACKGROUND":
+                        GUI.background_mode = True
+                        GUI.silent_scan = True
+                        GUI.hide_all()
+                        connection.write(b"OK\n")
                     else:
                         connection.write(b"ERROR\n")
 
