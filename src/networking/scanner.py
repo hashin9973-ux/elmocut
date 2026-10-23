@@ -51,18 +51,47 @@ class Scanner():
     
     def flush_arp(self):
         """
-        Flush ARP cache
+        Flush ARP cache with timeouts so a Windows command cannot hold a scan
+        open indefinitely after its results have already been collected.
         """
-        arp_cmd = terminal(CMD_ARP_CACHE_FLUSH)
-
-        # terminal() returns None on CalledProcessError — treat that the
-        # same as the known "incorrect parameter" case and fall back.
-        needs_fallback = arp_cmd is None or 'The parameter is incorrect' in arp_cmd
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            arp_result = subprocess.run(
+                CMD_ARP_CACHE_FLUSH,
+                shell=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=2.0,
+                creationflags=no_window
+            )
+            arp_output = (arp_result.stdout or "") + (arp_result.stderr or "")
+            needs_fallback = (
+                arp_result.returncode != 0
+                or "The parameter is incorrect" in arp_output
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"[Scanner] arp.exe cache flush timed out or failed: {exc}")
+            needs_fallback = True
 
         if needs_fallback:
-            result = terminal(CMD_ARP_CACHE_FLUSH_NEW)
-            if result is None:
-                print('[Scanner] ARP cache flush failed via both arp.exe and netsh.')
+            try:
+                fallback = subprocess.run(
+                    CMD_ARP_CACHE_FLUSH_NEW,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2.0,
+                    creationflags=no_window
+                )
+                if fallback.returncode != 0:
+                    print(
+                        "[Scanner] ARP cache flush failed via arp.exe and netsh: "
+                        + ((fallback.stderr or fallback.stdout or "").strip())
+                    )
+            except (OSError, subprocess.SubprocessError) as exc:
+                print(f"[Scanner] netsh ARP cache flush timed out or failed: {exc}")
 
     def add_me(self):
         """
