@@ -1,5 +1,5 @@
 from sys import argv, exit
-from PyQt6.QtWidgets import QApplication, QStyleFactory
+from PyQt6.QtWidgets import QApplication, QStyleFactory, QMessageBox
 from PyQt6.QtCore import QTimer
 from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
@@ -17,6 +17,7 @@ import os
 import socket
 import subprocess
 import sys
+import traceback
 
 os.environ["QT_QPA_PLATFORM"] = "windows:darkmode=0"
 
@@ -55,7 +56,7 @@ def relaunch_as_admin():
         "runas",
         sys.executable,
         subprocess.list2cmdline(parameters),
-        None,
+        os.path.dirname(os.path.abspath(sys.executable)),
         1
     )
     return int(result) > 32
@@ -65,12 +66,10 @@ if __name__ == "__main__":
     ping_scan = "--ping" in argv
 
     # Forward to an existing app before asking Windows for elevation.
-    # The short-lived command process should exit without starting a second GUI.
     if ping_scan and send_ping_to_existing_instance():
         exit(0)
 
-    # The EXE no longer has an always-elevated manifest. Elevate here only if
-    # no existing instance handled the command and the app itself must start.
+    # Request elevation only if a new main application instance is needed.
     if not is_admin():
         if not relaunch_as_admin():
             exit(1)
@@ -99,24 +98,31 @@ if __name__ == "__main__":
         migrate_settings_file()
         repair_settings()
         GUI = ElmoCut()
+
+        # Show and paint the main window before network/system initialization.
+        GUI.showNormal()
         GUI.show()
-        GUI.resizeEvent()
-        GUI.scanner.init()
-        GUI.killer.iface = GUI.scanner.iface
-        GUI.sync_ip_forwarding_state()
-        GUI.scanner.flush_arp()
+        GUI.raise_()
+        GUI.activateWindow()
+        app.processEvents()
+
+        startup_state = {"ready": False}
 
         # Listen on loopback so an unelevated --ping invocation can contact
-        # this elevated GUI without triggering a second UAC prompt.
+        # this GUI without triggering another UAC prompt.
         ipc_server = QTcpServer()
         if not ipc_server.listen(QHostAddress(IPC_HOST), IPC_PORT):
             print(f"[elmoCut] Could not start local command listener: {ipc_server.errorString()}")
 
         def run_ping_scan_when_idle():
-            # Wait for the current scan to finish before starting another scan.
-            if GUI.scan_thread.isRunning():
+            # Do not start another scan until startup and any current scan finish.
+            if not startup_state["ready"] or GUI.scan_thread.isRunning():
                 QTimer.singleShot(150, run_ping_scan_when_idle)
                 return
+
+            GUI.showNormal()
+            GUI.raise_()
+            GUI.activateWindow()
             GUI.scanHard()
 
         def accept_cli_connections():
@@ -129,6 +135,7 @@ if __name__ == "__main__":
                 def handle_cli_request(connection=connection, buffer=buffer, state=state):
                     if state["handled"]:
                         return
+
                     buffer.extend(bytes(connection.readAll()))
                     if b"\n" not in buffer:
                         return
@@ -140,6 +147,7 @@ if __name__ == "__main__":
                         QTimer.singleShot(0, run_ping_scan_when_idle)
                     else:
                         connection.write(b"ERROR\n")
+
                     connection.flush()
                     connection.disconnectFromHost()
 
@@ -149,12 +157,37 @@ if __name__ == "__main__":
 
         ipc_server.newConnection.connect(accept_cli_connections)
 
-        if ping_scan:
-            GUI.scanHard()
-        else:
-            GUI.scanEasy()
-        GUI.UpdateThread_Starter()
-        # Bring window to top
-        GUI.activateWindow()
-        # GUI.scanner.print_report()
+        def initialize_gui():
+            try:
+                GUI.resizeEvent()
+                GUI.scanner.init()
+                GUI.killer.iface = GUI.scanner.iface
+                GUI.sync_ip_forwarding_state()
+                GUI.scanner.flush_arp()
+
+                if ping_scan:
+                    GUI.scanHard()
+                else:
+                    GUI.scanEasy()
+
+                GUI.UpdateThread_Starter()
+                startup_state["ready"] = True
+
+                # Reassert visibility after startup to support customized Windows builds.
+                GUI.showNormal()
+                GUI.raise_()
+                GUI.activateWindow()
+            except Exception:
+                details = traceback.format_exc()
+                print(details)
+                QMessageBox.critical(
+                    GUI,
+                    "elmoCut startup error",
+                    "elmoCut encountered an error during startup.\n\n"
+                    "See the console output for details."
+                )
+
+        # Start the Qt event loop first so the window can paint while
+        # network/system startup runs.
+        QTimer.singleShot(0, initialize_gui)
         exit(app.exec())
