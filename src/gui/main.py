@@ -206,9 +206,14 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.background_mode = False
         self.silent_scan = False
         self.show()
-        # Restore window state if was minimized before hidden
+        # Restore window state if was minimized before hidden.
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.activateWindow()
+        if getattr(self, "_startup_scan_deferred", False):
+            self._startup_scan_deferred = False
+            # Display the persisted last-known inventory without forcing an
+            # automatic network sweep merely because the tray icon was opened.
+            self.processDevices()
 
     def tray_clicked(self, event):
         """
@@ -276,6 +281,10 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.saveUiState()
         self.hide()
         self.settings_window.hide()
+        # Device detail windows are separate top-level windows; hide them too
+        # so "minimize to tray" really leaves no app windows on the desktop.
+        for window in list(self.device_windows.values()):
+            window.hide()
 
     def quit_all(self):
         self.stop_all_watching() 
