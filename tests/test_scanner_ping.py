@@ -3,8 +3,13 @@
 The fake probe functions here are test doubles only; production still invokes
 CMD_PING_DEVICE through tools.utils.terminal exactly as before.
 """
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+# Source modules live under src/ in this repository.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from networking.scanner import Scanner, CMD_PING_DEVICE
 
