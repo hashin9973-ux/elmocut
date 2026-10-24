@@ -376,7 +376,7 @@ if __name__ == "__main__":
             startup_state["ping_pending"] = False
             startup_state["ping_active"] = True
             try:
-                started = GUI.scanHard(silent=True, force=True)
+                started = GUI.scanHard(silent=True)
                 startup_log(f"Existing-instance --ping scan started: {started}")
                 if not started:
                     startup_state["ping_active"] = False
@@ -462,7 +462,7 @@ if __name__ == "__main__":
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
                     startup_state["ping_active"] = True
-                    started = GUI.scanHard(silent=background_mode, force=True)
+                    started = GUI.scanHard(silent=background_mode)
                     startup_log(f"Initial --ping scan started: {started}")
                     if not started:
                         startup_state["ping_active"] = False
