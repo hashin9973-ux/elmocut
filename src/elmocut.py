@@ -43,7 +43,13 @@ from PyQt6.QtNetwork import QTcpServer, QHostAddress
 
 startup_log("Importing tools utilities")
 from tools.utils import goto
-from tools.utils_gui import npcap_exists, duplicate_elmocut, repair_settings, migrate_settings_file
+from tools.utils_gui import (
+    npcap_exists,
+    single_instance_exists,
+    acquire_single_instance,
+    repair_settings,
+    migrate_settings_file,
+)
 from tools.qtools import msg_box, Buttons, MsgIcon
 
 startup_log("Importing GUI module")
@@ -60,15 +66,25 @@ IPC_HOST = "127.0.0.1"
 IPC_PORT = 47653
 
 
-def send_command_to_existing_instance(command):
+def send_command_to_existing_instance(command, connect_timeout=0.5, response_timeout=1.5):
     """Forward a local CLI command to an existing GUI before requesting elevation."""
     try:
-        with socket.create_connection((IPC_HOST, IPC_PORT), timeout=0.5) as client:
-            client.settimeout(1.5)
+        with socket.create_connection((IPC_HOST, IPC_PORT), timeout=connect_timeout) as client:
+            client.settimeout(response_timeout)
             client.sendall((command + "\n").encode("ascii"))
             return client.recv(32).strip() == b"OK"
     except OSError:
         return False
+
+
+def wait_for_existing_instance(command, timeout=8.0):
+    """Wait for an owned instance to finish startup and begin accepting IPC."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if send_command_to_existing_instance(command, connect_timeout=0.2, response_timeout=0.4):
+            return True
+        time.sleep(0.15)
+    return False
 
 
 def send_ping_to_existing_instance():
@@ -116,13 +132,27 @@ if __name__ == "__main__":
         if send_ping_to_existing_instance():
             startup_log("Existing GUI acknowledged --ping; exiting launcher")
             exit(0)
-        startup_log("No existing GUI acknowledged --ping")
+        if single_instance_exists():
+            startup_log("Existing GUI owns the instance mutex; waiting for its IPC listener")
+            if wait_for_existing_instance("PING"):
+                startup_log("Existing GUI acknowledged delayed --ping; exiting launcher")
+            else:
+                startup_log("Existing mutex has no responding IPC listener; refusing duplicate launch")
+            exit(0)
+        startup_log("No existing GUI acknowledged --ping and no instance mutex exists")
     elif "--background" in argv:
         startup_log("Checking for an existing GUI instance for background mode")
         if send_command_to_existing_instance("BACKGROUND"):
             startup_log("Existing GUI switched to background; exiting launcher")
             exit(0)
-        startup_log("No existing GUI acknowledged background mode")
+        if single_instance_exists():
+            startup_log("Existing GUI owns the instance mutex; waiting for its IPC listener")
+            if wait_for_existing_instance("BACKGROUND"):
+                startup_log("Existing GUI acknowledged delayed background command; exiting launcher")
+            else:
+                startup_log("Existing mutex has no responding IPC listener; refusing duplicate launch")
+            exit(0)
+        startup_log("No existing GUI acknowledged background mode and no instance mutex exists")
 
     # Request elevation only if a new main application instance is needed.
     startup_log("Checking administrator token")
@@ -149,6 +179,30 @@ if __name__ == "__main__":
     icon = ElmoCut.processIcon(app_icon)
     is_restarting = "--restarting" in argv
 
+    # Claim the mutex before doing any more startup work. This closes the race
+    # between process-list checks and the delayed IPC listener initialization.
+    try:
+        instance_acquired = acquire_single_instance()
+    except Exception as exc:
+        startup_log(f"Failed to acquire single-instance mutex: {exc!r}")
+        msg_box("elmoCut", "Could not establish single-instance protection.\n\n"
+                "Check the startup log for details.", MsgIcon.CRITICAL, icon)
+        exit(1)
+
+    if not instance_acquired:
+        startup_log("Another process owns the single-instance mutex")
+        if ping_scan or "--background" in argv:
+            command = "PING" if ping_scan else "BACKGROUND"
+            if wait_for_existing_instance(command):
+                startup_log(f"Existing GUI acknowledged {command}; exiting launcher")
+            else:
+                startup_log(f"Existing GUI did not acknowledge {command}; refusing duplicate launch")
+            exit(0)
+        msg_box("elmoCut", "elmoCut is already running!", MsgIcon.WARN, icon)
+        exit(0)
+
+    startup_log("Single-instance mutex acquired")
+
     # Check if Npcap is installed
     startup_log("Checking Npcap installation")
     npcap_installed = npcap_exists()
@@ -160,21 +214,11 @@ if __name__ == "__main__":
             goto(NPCAP_URL)
         startup_log("Npcap-missing dialog closed")
 
-    # Check if another elmoCut process is running
-    elif not is_restarting:
-        startup_log("Checking for duplicate elmoCut process")
-        already_running = duplicate_elmocut()
-        startup_log(f"Duplicate process found: {already_running}")
-        if already_running:
-            msg_box("elmoCut", "elmoCut is already running!", MsgIcon.WARN, icon)
-            startup_log("Duplicate-process dialog closed")
-        else:
-            already_running = False
-    else:
-        already_running = False
+    # The mutex acquired above is the authoritative duplicate check.
+    # --restarting safely acquires it after restart_gui_app releases the old one.
 
     # Run the GUI
-    if npcap_installed and not already_running:
+    if npcap_installed:
         startup_log("Migrating settings")
         migrate_settings_file()
         startup_log("Settings migration completed")
