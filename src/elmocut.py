@@ -70,22 +70,22 @@ IPC_SERVER_NAME = "elmoCut.Command.v3"
 
 
 def send_command_to_existing_instance(command, connect_timeout=0.5, response_timeout=1.5):
-    """Forward a CLI command to the running GUI, preferring a Windows local socket.
-
-    A TCP fallback preserves compatibility with already-running older builds.
-    """
-    payload = (command + "\n").encode("ascii")
+    """Forward a CLI command to the running GUI without accidentally sending it twice."""
+    payload = (command + "\\n").encode("ascii")
     try:
         local_client = QLocalSocket()
         local_client.connectToServer(IPC_SERVER_NAME)
         if local_client.waitForConnected(max(1, int(connect_timeout * 1000))):
-            local_client.write(payload)
+            queued = local_client.write(payload)
             local_client.waitForBytesWritten(max(1, int(response_timeout * 1000)))
             if local_client.waitForReadyRead(max(1, int(response_timeout * 1000))):
                 response = bytes(local_client.readAll()).strip()
                 local_client.disconnectFromServer()
-                if response == b"OK":
-                    return True
+                return response == b"OK"
+            local_client.abort()
+            # Once the local server accepted a connection and queued the
+            # request, don't resend it over TCP just because its ACK was late.
+            return queued >= len(payload)
         local_client.abort()
     except Exception as exc:
         startup_log(f"Local IPC request failed: {exc!r}")
@@ -94,7 +94,13 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
         with socket.create_connection((IPC_HOST, IPC_PORT), timeout=connect_timeout) as client:
             client.settimeout(response_timeout)
             client.sendall(payload)
-            return client.recv(32).strip() == b"OK"
+            try:
+                response = client.recv(32).strip()
+                return response == b"OK"
+            except socket.timeout:
+                # sendall succeeded on a live listener; avoid repeating a
+                # command that may already have been queued by the GUI.
+                return True
     except OSError:
         return False
 
