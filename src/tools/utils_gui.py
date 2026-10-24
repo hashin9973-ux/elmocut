@@ -37,26 +37,63 @@ _KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
 _KERNEL32.CloseHandle.restype = ctypes.c_bool
 _KERNEL32.ReleaseMutex.argtypes = [ctypes.c_void_p]
 _KERNEL32.ReleaseMutex.restype = ctypes.c_bool
+_KERNEL32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+_KERNEL32.WaitForSingleObject.restype = ctypes.c_ulong
+
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_ABANDONED = 0x00000080
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ALREADY_EXISTS = 183
+_ERROR_FILE_NOT_FOUND = 2
+_MUTEX_ACCESS = 0x00100000 | 0x0001  # SYNCHRONIZE | MUTEX_MODIFY_STATE
 
 
 def single_instance_exists():
-    """Return True only when another process owns the elmoCut mutex."""
-    handle = _KERNEL32.OpenMutexW(0x00100000, False, _INSTANCE_MUTEX_NAME)
+    """Return True only when the mutex is actively owned by another process.
+
+    A named mutex handle can exist without an owner. Merely opening it leads to
+    false 'already running' reports after a released/abandoned instance.
+    """
+    handle = _KERNEL32.OpenMutexW(_MUTEX_ACCESS, False, _INSTANCE_MUTEX_NAME)
     if not handle:
-        return False
-    _KERNEL32.CloseHandle(handle)
-    return True
+        # Access denied means a protected instance may exist; a missing name
+        # means no instance guard object exists.
+        return ctypes.get_last_error() != _ERROR_FILE_NOT_FOUND
+
+    try:
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result == _WAIT_TIMEOUT:
+            return True
+        if wait_result in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.ReleaseMutex(handle)
+            return False
+        return True
+    finally:
+        _KERNEL32.CloseHandle(handle)
 
 
 def acquire_single_instance():
-    """Acquire and retain the named mutex for this process; False means occupied."""
+    """Acquire the named mutex, recovering an existing but currently free object."""
     global _INSTANCE_MUTEX_HANDLE
+
+    # Prevent a stale Win32 error from causing a newly created mutex to be
+    # misidentified as a pre-existing instance.
+    ctypes.set_last_error(0)
     handle = _KERNEL32.CreateMutexW(None, True, _INSTANCE_MUTEX_NAME)
+    last_error = ctypes.get_last_error()
     if not handle:
-        raise ctypes.WinError(ctypes.get_last_error())
-    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
-        _KERNEL32.CloseHandle(handle)
-        return False
+        raise ctypes.WinError(last_error)
+
+    if last_error == _ERROR_ALREADY_EXISTS:
+        # CreateMutex does not grant ownership when the object already exists.
+        # Try to acquire it: timeout means another instance really owns it.
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.CloseHandle(handle)
+            if wait_result == _WAIT_TIMEOUT:
+                return False
+            raise ctypes.WinError(ctypes.get_last_error() or 1)
+
     _INSTANCE_MUTEX_HANDLE = handle
     return True
 
