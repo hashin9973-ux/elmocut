@@ -72,7 +72,7 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
 
     A TCP fallback preserves compatibility with already-running older builds.
     """
-    payload = (command + "\\n").encode("ascii")
+    payload = (command + "\n").encode("ascii")
     try:
         local_client = QLocalSocket()
         local_client.connectToServer(IPC_SERVER_NAME)
@@ -301,22 +301,22 @@ if __name__ == "__main__":
                         return
 
                     buffer.extend(bytes(connection.readAll()))
-                    if b"\\n" not in buffer:
+                    if b"\n" not in buffer:
                         return
 
-                    command = bytes(buffer).split(b"\\n", 1)[0].strip()
+                    command = bytes(buffer).split(b"\n", 1)[0].strip()
                     state["handled"] = True
                     if command == b"PING":
                         # Acknowledge receipt; the existing GUI owns the scan.
-                        connection.write(b"OK\\n")
+                        connection.write(b"OK\n")
                         QTimer.singleShot(0, run_ping_scan_when_idle)
                     elif command == b"BACKGROUND":
                         GUI.background_mode = True
                         GUI.silent_scan = True
                         GUI.hide_all()
-                        connection.write(b"OK\\n")
+                        connection.write(b"OK\n")
                     else:
-                        connection.write(b"ERROR\\n")
+                        connection.write(b"ERROR\n")
 
                     connection.flush()
                     connection.disconnectFromHost()
