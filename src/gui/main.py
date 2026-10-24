@@ -312,8 +312,17 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.settings_window.hide()
         # Device detail windows are separate top-level windows; hide them too
         # so "minimize to tray" really leaves no app windows on the desktop.
-        for window in list(self.device_windows.values()):
-            window.hide()
+        for mac, window in list(self.device_windows.items()):
+            if mac in self.watched_devices:
+                # Keep live watch windows allocated so their callbacks remain
+                # connected, but never leave them visible in tray mode.
+                window.hide()
+            else:
+                # Unwatched detail windows hold only UI/cache state; discard
+                # them and recreate on demand rather than retaining each one.
+                window.close()
+                window.deleteLater()
+                self.device_windows.pop(mac, None)
         # Release the per-cell Qt objects while hidden. Device data itself
         # remains in Scanner.devices and is redrawn on restore or after a scan.
         self.tableScan.clearContents()
