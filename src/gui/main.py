@@ -153,7 +153,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.applySettings()
         # Run once after the first layout pass so the initial window also fits.
-        QTimer.singleShot(0, self.resizeTableColumns)
+        QTimer.singleShot(0, self.applyInitialTableSizing)
     
     @staticmethod
     def processIcon(icon_data):
@@ -265,6 +265,25 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             self._ui_state.sync()
         except Exception as exc:
             print(f"[elmoCut] Could not save window state: {exc}")
+
+    def applyInitialTableSizing(self):
+        """Restore saved column widths when they fit; otherwise use responsive sizing."""
+        try:
+            saved = self._ui_state.value("main/table_column_widths", [])
+            if isinstance(saved, str):
+                saved = [part for part in saved.strip("[]").split(",") if part.strip()]
+            widths = [int(value) for value in saved]
+            if (
+                len(widths) == self.tableScan.columnCount()
+                and all(width >= 32 for width in widths)
+                and sum(widths) <= self.tableScan.viewport().width()
+            ):
+                for index, width in enumerate(widths):
+                    self.tableScan.setColumnWidth(index, width)
+                return
+        except (TypeError, ValueError):
+            pass
+        self.resizeTableColumns()
 
     def restoreUiState(self):
         """Restore saved geometry and column widths, tolerating stale settings."""
