@@ -650,11 +650,13 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         """
         self.ScanThread_Starter(silent=silent)
     
-    def scanHard(self, silent=False):
+    def scanHard(self, silent=False, force=False):
         """
         Existing ping scan button connector.
+        force=True lets the CLI request a LAN scan without relying on the
+        default-gateway heuristic, which can reject valid local-only networks.
         """
-        self.ScanThread_Starter(scan_type=1, silent=silent)
+        return self.ScanThread_Starter(scan_type=1, silent=silent, force=force)
 
     def scanAdvanced(self, silent=False):
         """
@@ -662,13 +664,14 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         """
         self.ScanThread_Starter(scan_type=2, silent=silent)
 
-    def ScanThread_Starter(self, scan_type=0, silent=False):
+    def ScanThread_Starter(self, scan_type=0, silent=False, force=False):
         """
-        Scan Thread Starter
+        Scan Thread Starter. A forced CLI scan bypasses only the gateway
+        connectivity heuristic; the scanner still validates its actual targets.
         """
         self.silent_scan = bool(silent or self.background_mode)
-        if not self.connected(show_msg_box=not self.silent_scan):
-            return
+        if not force and not self.connected(show_msg_box=not self.silent_scan):
+            return False
 
         self.centralwidget.setEnabled(False)
 
@@ -692,6 +695,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.scan_thread.scanner = self.scanner
         self.scan_thread.scan_type = scan_type
         self.scan_thread.start()
+        return True
 
     def ScanThread_Reciever(self, success=True):
         """
