@@ -39,7 +39,7 @@ from sys import argv, exit
 from PyQt6.QtWidgets import QApplication, QStyleFactory, QMessageBox
 startup_log("Importing PyQt6 core and network")
 from PyQt6.QtCore import QTimer
-from PyQt6.QtNetwork import QTcpServer, QHostAddress
+from PyQt6.QtNetwork import QTcpServer, QHostAddress, QLocalServer, QLocalSocket
 
 startup_log("Importing tools utilities")
 from tools.utils import goto
@@ -64,18 +64,37 @@ startup_log("Module imports completed")
 
 IPC_HOST = "127.0.0.1"
 IPC_PORT = 47653
+IPC_SERVER_NAME = "elmoCut.Command.v3"
 
 
 def send_command_to_existing_instance(command, connect_timeout=0.5, response_timeout=1.5):
-    """Forward a local CLI command to an existing GUI before requesting elevation."""
+    """Forward a CLI command to the running GUI, preferring a Windows local socket.
+
+    A TCP fallback preserves compatibility with already-running older builds.
+    """
+    payload = (command + "\\n").encode("ascii")
+    try:
+        local_client = QLocalSocket()
+        local_client.connectToServer(IPC_SERVER_NAME)
+        if local_client.waitForConnected(max(1, int(connect_timeout * 1000))):
+            local_client.write(payload)
+            local_client.waitForBytesWritten(max(1, int(response_timeout * 1000)))
+            if local_client.waitForReadyRead(max(1, int(response_timeout * 1000))):
+                response = bytes(local_client.readAll()).strip()
+                local_client.disconnectFromServer()
+                if response == b"OK":
+                    return True
+        local_client.abort()
+    except Exception as exc:
+        startup_log(f"Local IPC request failed: {exc!r}")
+
     try:
         with socket.create_connection((IPC_HOST, IPC_PORT), timeout=connect_timeout) as client:
             client.settimeout(response_timeout)
-            client.sendall((command + "\n").encode("ascii"))
+            client.sendall(payload)
             return client.recv(32).strip() == b"OK"
     except OSError:
         return False
-
 
 def wait_for_existing_instance(command, timeout=8.0):
     """Wait for an owned instance to finish startup and begin accepting IPC."""
@@ -246,14 +265,19 @@ if __name__ == "__main__":
 
         startup_state = {"ready": False}
 
-        # Listen on loopback so an unelevated --ping invocation can contact
-        # this GUI without triggering another UAC prompt.
+        # Listen on a Windows local socket for CLI commands. Keep a loopback
+        # TCP listener as a compatibility path for older installed builds.
+        local_ipc_server = QLocalServer()
+        if local_ipc_server.listen(IPC_SERVER_NAME):
+            startup_log(f"Local IPC listener listening as {IPC_SERVER_NAME}")
+        else:
+            startup_log(f"Local IPC listener failed: {local_ipc_server.errorString()}")
+
         ipc_server = QTcpServer()
         if not ipc_server.listen(QHostAddress(IPC_HOST), IPC_PORT):
-            startup_log(f"IPC listener failed: {ipc_server.errorString()}")
-            print(f"[elmoCut] Could not start local command listener: {ipc_server.errorString()}")
+            startup_log(f"Legacy TCP IPC listener failed: {ipc_server.errorString()}")
         else:
-            startup_log(f"IPC listener listening on {IPC_HOST}:{IPC_PORT}")
+            startup_log(f"Legacy TCP IPC listener listening on {IPC_HOST}:{IPC_PORT}")
 
         def run_ping_scan_when_idle():
             # Do not start another scan until startup and any current scan finish.
@@ -265,9 +289,9 @@ if __name__ == "__main__":
             # already running instance; do not steal focus.
             GUI.scanHard(silent=True)
 
-        def accept_cli_connections():
-            while ipc_server.hasPendingConnections():
-                connection = ipc_server.nextPendingConnection()
+        def accept_cli_connections(server):
+            while server.hasPendingConnections():
+                connection = server.nextPendingConnection()
                 connection.disconnected.connect(connection.deleteLater)
                 buffer = bytearray()
                 state = {"handled": False}
@@ -277,21 +301,22 @@ if __name__ == "__main__":
                         return
 
                     buffer.extend(bytes(connection.readAll()))
-                    if b"\n" not in buffer:
+                    if b"\\n" not in buffer:
                         return
 
-                    command = bytes(buffer).split(b"\n", 1)[0].strip()
+                    command = bytes(buffer).split(b"\\n", 1)[0].strip()
                     state["handled"] = True
                     if command == b"PING":
-                        connection.write(b"OK\n")
+                        # Acknowledge receipt; the existing GUI owns the scan.
+                        connection.write(b"OK\\n")
                         QTimer.singleShot(0, run_ping_scan_when_idle)
                     elif command == b"BACKGROUND":
                         GUI.background_mode = True
                         GUI.silent_scan = True
                         GUI.hide_all()
-                        connection.write(b"OK\n")
+                        connection.write(b"OK\\n")
                     else:
-                        connection.write(b"ERROR\n")
+                        connection.write(b"ERROR\\n")
 
                     connection.flush()
                     connection.disconnectFromHost()
@@ -300,7 +325,12 @@ if __name__ == "__main__":
                 if connection.bytesAvailable():
                     handle_cli_request()
 
-        ipc_server.newConnection.connect(accept_cli_connections)
+        local_ipc_server.newConnection.connect(
+            lambda server=local_ipc_server: accept_cli_connections(server)
+        )
+        ipc_server.newConnection.connect(
+            lambda server=ipc_server: accept_cli_connections(server)
+        )
 
         def initialize_gui():
             try:
