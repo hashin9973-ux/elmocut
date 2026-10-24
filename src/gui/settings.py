@@ -3,6 +3,8 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtCore import Qt
 from qdarkstyle import load_stylesheet
 import os
+import sys
+import subprocess
 from networking.diverter import ElmoDivert
 from tools.utils_gui import import_settings, export_settings, get_settings, \
                             add_to_startup, remove_from_startup, set_settings, restart_gui_app
@@ -51,9 +53,17 @@ class Settings(QMainWindow, Ui_MainWindow):
         iface         =  self.comboInterface.currentText()
         is_ip_forward =  self.chkIpForwarding.isChecked()
 
-        exe_path = os.path.join(os.getcwd(), 'elmocut.exe')
+        # Use the installed executable (or source script) instead of a path
+        # relative to the current working directory. Start in tray mode after
+        # sign-in and skip the initial scan to reduce idle work.
+        if getattr(sys, 'frozen', False):
+            startup_command = subprocess.list2cmdline([sys.executable, '--background'])
+        else:
+            startup_command = subprocess.list2cmdline(
+                [sys.executable, os.path.abspath(sys.argv[0]), '--background']
+            )
         if is_autostart:
-            add_to_startup(exe_path)
+            add_to_startup(startup_command)
         else:
             remove_from_startup()
 
