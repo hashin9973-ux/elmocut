@@ -76,16 +76,22 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
         local_client = QLocalSocket()
         local_client.connectToServer(IPC_SERVER_NAME)
         if local_client.waitForConnected(max(1, int(connect_timeout * 1000))):
-            queued = local_client.write(payload)
+            local_client.write(payload)
             local_client.waitForBytesWritten(max(1, int(response_timeout * 1000)))
             if local_client.waitForReadyRead(max(1, int(response_timeout * 1000))):
                 response = bytes(local_client.readAll()).strip()
                 local_client.disconnectFromServer()
-                return response == b"OK"
+                if response == b"OK":
+                    return True
+                startup_log(f"Local IPC returned an unexpected response: {response!r}")
+            else:
+                # A successful write only means Qt accepted the bytes; it
+                # does not prove the GUI processed the command. Try TCP too.
+                startup_log(
+                    f"Local IPC sent {command!r} but received no acknowledgement; "
+                    "trying TCP fallback"
+                )
             local_client.abort()
-            # Once the local server accepted a connection and queued the
-            # request, don't resend it over TCP just because its ACK was late.
-            return queued >= len(payload)
         local_client.abort()
     except Exception as exc:
         startup_log(f"Local IPC request failed: {exc!r}")
@@ -96,11 +102,13 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
             client.sendall(payload)
             try:
                 response = client.recv(32).strip()
-                return response == b"OK"
             except socket.timeout:
-                # sendall succeeded on a live listener; avoid repeating a
-                # command that may already have been queued by the GUI.
-                return True
+                startup_log(f"TCP IPC sent {command!r} but received no acknowledgement")
+                return False
+            if response != b"OK":
+                startup_log(f"TCP IPC returned an unexpected response: {response!r}")
+                return False
+            return True
     except OSError:
         return False
 
@@ -315,7 +323,18 @@ if __name__ == "__main__":
             app.processEvents()
             startup_log(f"Main window show calls completed; visible={GUI.isVisible()}")
 
-        startup_state = {"ready": False}
+        startup_state = {
+            "ready": False,
+            "ping_pending": False,
+            "ping_active": False,
+        }
+
+        def clear_ping_active():
+            if startup_state["ping_active"]:
+                startup_state["ping_active"] = False
+                startup_log("Requested ping scan finished")
+
+        GUI.scan_thread.finished.connect(clear_ping_active)
 
         # Listen on a Windows local socket for CLI commands. Keep a loopback
         # TCP listener as a compatibility path for older installed builds.
@@ -345,23 +364,28 @@ if __name__ == "__main__":
             startup_log(f"Legacy TCP IPC listener listening on {IPC_HOST}:{IPC_PORT}")
 
         def run_ping_scan_when_idle():
-            # Do not start another scan until startup and any current scan finish.
+            # Hold one pending request until startup and any current scan finish.
+            if not startup_state["ping_pending"]:
+                return
             if not startup_state["ready"] or GUI.scan_thread.isRunning():
                 QTimer.singleShot(150, run_ping_scan_when_idle)
                 return
 
             # Keep the current visible/hidden state when the CLI pings an
-            # already running instance; do not steal focus. Force skips only
-            # the default-gateway check, not the actual scan operation.
+            # already running instance; do not steal focus.
+            startup_state["ping_pending"] = False
+            startup_state["ping_active"] = True
             try:
                 started = GUI.scanHard(silent=True, force=True)
                 startup_log(f"Existing-instance --ping scan started: {started}")
                 if not started:
+                    startup_state["ping_active"] = False
                     startup_log(
                         "Existing-instance --ping was not started; "
                         "the scan starter returned False"
                     )
             except Exception:
+                startup_state["ping_active"] = False
                 startup_log(
                     "Existing-instance --ping scan start exception:\\n"
                     + traceback.format_exc()
@@ -388,9 +412,18 @@ if __name__ == "__main__":
                         # Confirms that the elevated GUI's IPC server is live.
                         connection.write(b"OK\n")
                     elif command == b"PING":
-                        # Acknowledge receipt; the existing GUI owns the scan.
+                        # Coalesce transport retries into a single pending scan.
+                        if (
+                            not startup_state["ping_pending"]
+                            and not startup_state["ping_active"]
+                        ):
+                            startup_state["ping_pending"] = True
+                            QTimer.singleShot(0, run_ping_scan_when_idle)
+                        else:
+                            startup_log(
+                                "Coalesced duplicate --ping request; scan is pending or active"
+                            )
                         connection.write(b"OK\n")
-                        QTimer.singleShot(0, run_ping_scan_when_idle)
                     elif command == b"BACKGROUND":
                         GUI.background_mode = True
                         GUI.silent_scan = True
@@ -428,9 +461,11 @@ if __name__ == "__main__":
 
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
+                    startup_state["ping_active"] = True
                     started = GUI.scanHard(silent=background_mode, force=True)
                     startup_log(f"Initial --ping scan started: {started}")
                     if not started:
+                        startup_state["ping_active"] = False
                         raise RuntimeError("The requested --ping scan did not start")
                 elif background_mode:
                     # Startup in tray should be idle: don't launch a network
