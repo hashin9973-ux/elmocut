@@ -107,7 +107,9 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         # Let all seven columns fit in the available viewport. The generated UI
         # sets a 170 px minimum per section, which clips the right-hand columns
         # (including Nickname) on the default 870 px window.
-        self.tableScan.horizontalHeader().setMinimumSectionSize(64)
+        self.tableScan.horizontalHeader().setMinimumSectionSize(32)
+        self.tableScan.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.tableScan.setWordWrap(False)
         self.tableScan.setShowGrid(False)
         # self.tableScan.setStyleSheet("QTableWidget::item { border: none; }")
 
@@ -305,18 +307,20 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         return True
 
-    def resizeEvent(self, event=True):
-        """Resize columns proportionally so the Nickname column stays visible."""
+    def resizeEvent(self, event):
+        """Keep table columns fitted to the currently available window width."""
+        super().resizeEvent(event)
         if not hasattr(self, "tableScan"):
             return
-        weights = (0.95, 1.22, 1.00, 0.68, 1.28, 1.10, 1.37)
+        # Wider network identifiers get more room; shorter fields stay compact.
+        weights = (0.95, 0.70, 1.35, 0.90, 0.62, 1.20, 1.05, 1.05)
         available = max(0, self.tableScan.viewport().width())
         total_weight = sum(weights)
         widths = [int(available * weight / total_weight) for weight in weights]
         if widths:
             widths[-1] += available - sum(widths)
         for column, width in enumerate(widths):
-            self.tableScan.setColumnWidth(column, max(64, width))
+            self.tableScan.setColumnWidth(column, max(32, width))
 
     def closeEvent(self, event):
         """
@@ -369,11 +373,8 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         if not 0 <= column < len(values):
             return
         cell = str(values[column])
-
-        if len(cell) > 20:
-            cell = cell[:20] + '...'
-
         self.lblcenter.setText(cell)
+        self.lblcenter.setToolTip(cell)
         copy(cell)
 
     def deviceClicked(self):
@@ -424,6 +425,9 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             colored_item(ql, *colors)
         if foreground:
             ql.setForeground(QColor(foreground))
+        # Long values are elided in the fitted column, but remain available on
+        # hover so responsive sizing never hides data permanently.
+        ql.setToolTip(str(text))
 
         self.tableScan.setItem(row, column, ql)
 
@@ -438,8 +442,15 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         }
         dtype = getattr(device.type, 'value', device.type)
         nickname = device.name if device.name not in ('', None, '-') else '-'
+        average_ping = getattr(device, 'avg_ping_ms', None)
+        ping_text = (
+            f'{average_ping:.1f} ms'
+            if isinstance(average_ping, (int, float)) and not isinstance(average_ping, bool)
+            else '-'
+        )
         return [
             device.ip,
+            ping_text,
             device.mac,
             device.vendor,
             dtype,
