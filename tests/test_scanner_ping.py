@@ -21,8 +21,9 @@ class PingScanWorkerTests(unittest.TestCase):
             "192.0.2.2",
             "192.0.2.3",
         ]
-        scanner.qt_progress_signal = []
-        scanner.qt_progress_signal.append = scanner.qt_progress_signal.append
+        progress = []
+        scanner.qt_progress_signal = progress.append
+        scanner._test_progress = progress
         scanner.init = lambda: None
         scanner.generate_ips = lambda: None
         return scanner
@@ -41,7 +42,7 @@ class PingScanWorkerTests(unittest.TestCase):
         self.assertTrue(scanner.ping_scan())
         self.assertCountEqual(attempted, scanner.ips)
         self.assertEqual(scanner._Scanner__ping_done, len(scanner.ips))
-        self.assertEqual(scanner.qt_progress_signal, [1, 2, 3])
+        self.assertEqual(scanner._test_progress, [1, 2, 3])
 
     def test_all_probe_process_launches_failing_is_reported(self):
         scanner = self.make_scanner()
