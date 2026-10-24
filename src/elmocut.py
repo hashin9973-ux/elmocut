@@ -52,6 +52,7 @@ from tools.utils_gui import (
     repair_settings,
     migrate_settings_file,
 )
+from tools.command_mailbox import mailbox_directory, send_mailbox_command, service_mailbox
 from tools.qtools import msg_box, Buttons, MsgIcon
 
 startup_log("Importing GUI module")
@@ -70,7 +71,7 @@ IPC_SERVER_NAME = "elmoCut.Command.v3"
 
 
 def send_command_to_existing_instance(command, connect_timeout=0.5, response_timeout=1.5):
-    """Forward a CLI command to the running GUI without accidentally sending it twice."""
+    """Forward a CLI command to the running GUI, with a file-mailbox fallback."""
     payload = (command + "\n").encode("ascii")
     try:
         local_client = QLocalSocket()
@@ -85,14 +86,11 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
                     return True
                 startup_log(f"Local IPC returned an unexpected response: {response!r}")
             else:
-                # A successful write only means Qt accepted the bytes; it
-                # does not prove the GUI processed the command. Try TCP too.
                 startup_log(
                     f"Local IPC sent {command!r} but received no acknowledgement; "
                     "trying TCP fallback"
                 )
             local_client.abort()
-        local_client.abort()
     except Exception as exc:
         startup_log(f"Local IPC request failed: {exc!r}")
 
@@ -104,13 +102,31 @@ def send_command_to_existing_instance(command, connect_timeout=0.5, response_tim
                 response = client.recv(32).strip()
             except socket.timeout:
                 startup_log(f"TCP IPC sent {command!r} but received no acknowledgement")
-                return False
-            if response != b"OK":
+            else:
+                if response == b"OK":
+                    return True
                 startup_log(f"TCP IPC returned an unexpected response: {response!r}")
-                return False
-            return True
-    except OSError:
-        return False
+    except OSError as exc:
+        startup_log(f"TCP IPC request failed: {exc!r}")
+
+    # Socket IPC can fail on customized Windows installations or across
+    # elevation boundaries. If the app mutex is held, use a per-user mailbox
+    # rather than silently exiting without requesting the scan.
+    try:
+        if single_instance_exists():
+            startup_log(f"Socket IPC did not acknowledge {command!r}; trying file mailbox")
+            if send_mailbox_command(
+                command,
+                timeout=max(1.0, response_timeout),
+                directory=mailbox_directory(),
+            ):
+                startup_log(f"File mailbox acknowledged {command!r}")
+                return True
+            startup_log(f"File mailbox did not acknowledge {command!r}")
+    except Exception as exc:
+        startup_log(f"File mailbox IPC failed: {exc!r}")
+
+    return False
 
 def wait_for_existing_instance(command, timeout=8.0):
     """Wait for an owned instance to finish startup and begin accepting IPC."""
@@ -156,6 +172,12 @@ def relaunch_as_admin():
 
 if __name__ == "__main__":
     startup_log("Entered main entry point")
+    startup_log(f"Executable: {sys.executable!r}; argv: {sys.argv!r}; cwd: {os.getcwd()!r}")
+    # Create the shared folder before the elevated child starts.
+    try:
+        os.makedirs(mailbox_directory(), exist_ok=True)
+    except OSError as exc:
+        startup_log(f"Could not prepare command mailbox before elevation: {exc!r}")
     ping_scan = "--ping" in argv
     background_mode = ping_scan or "--background" in argv
     startup_log(f"CLI ping requested: {ping_scan}")
@@ -391,6 +413,40 @@ if __name__ == "__main__":
                     + traceback.format_exc()
                 )
 
+        def dispatch_cli_command(command):
+            """Handle one validated command regardless of IPC transport."""
+            if command == "READY":
+                return True
+            if command == "PING":
+                if not startup_state["ping_pending"] and not startup_state["ping_active"]:
+                    startup_state["ping_pending"] = True
+                    startup_log("Accepted --ping request; scheduling scan")
+                    QTimer.singleShot(0, run_ping_scan_when_idle)
+                else:
+                    startup_log("Coalesced duplicate --ping request; scan is pending or active")
+                return True
+            if command == "BACKGROUND":
+                GUI.background_mode = True
+                GUI.silent_scan = True
+                GUI.hide_all()
+                startup_log("Accepted background-mode request")
+                return True
+            return False
+
+        def poll_command_mailbox():
+            """Poll the per-user mailbox as a fallback for socket IPC."""
+            try:
+                processed = service_mailbox(
+                    dispatch_cli_command,
+                    directory=mailbox_directory(),
+                    logger=startup_log,
+                )
+                if processed:
+                    startup_log(f"Processed {processed} command-mailbox request(s)")
+            except Exception:
+                startup_log("Command-mailbox polling failed:\n" + traceback.format_exc())
+            QTimer.singleShot(150, poll_command_mailbox)
+
         def accept_cli_connections(server):
             while server.hasPendingConnections():
                 connection = server.nextPendingConnection()
@@ -408,28 +464,11 @@ if __name__ == "__main__":
 
                     command = bytes(buffer).split(b"\n", 1)[0].strip()
                     state["handled"] = True
-                    if command == b"READY":
-                        # Confirms that the elevated GUI's IPC server is live.
-                        connection.write(b"OK\n")
-                    elif command == b"PING":
-                        # Coalesce transport retries into a single pending scan.
-                        if (
-                            not startup_state["ping_pending"]
-                            and not startup_state["ping_active"]
-                        ):
-                            startup_state["ping_pending"] = True
-                            QTimer.singleShot(0, run_ping_scan_when_idle)
-                        else:
-                            startup_log(
-                                "Coalesced duplicate --ping request; scan is pending or active"
-                            )
-                        connection.write(b"OK\n")
-                    elif command == b"BACKGROUND":
-                        GUI.background_mode = True
-                        GUI.silent_scan = True
-                        GUI.hide_all()
-                        connection.write(b"OK\n")
-                    else:
+                    try:
+                        accepted = dispatch_cli_command(command.decode("ascii", errors="replace"))
+                        connection.write(b"OK\n" if accepted else b"ERROR\n")
+                    except Exception:
+                        startup_log("CLI command handler failed:\n" + traceback.format_exc())
                         connection.write(b"ERROR\n")
 
                     connection.flush()
@@ -445,6 +484,13 @@ if __name__ == "__main__":
         ipc_server.newConnection.connect(
             lambda server=ipc_server: accept_cli_connections(server)
         )
+        # Create the mailbox from the same per-user folder as the unelevated
+        # launcher; the launcher also pre-creates it before requesting UAC.
+        try:
+            os.makedirs(mailbox_directory(), exist_ok=True)
+        except OSError as exc:
+            startup_log(f"Could not prepare command mailbox: {exc!r}")
+        QTimer.singleShot(150, poll_command_mailbox)
 
         def initialize_gui():
             try:
