@@ -71,7 +71,7 @@ IPC_SERVER_NAME = "elmoCut.Command.v3"
 
 def send_command_to_existing_instance(command, connect_timeout=0.5, response_timeout=1.5):
     """Forward a CLI command to the running GUI without accidentally sending it twice."""
-    payload = (command + "\\n").encode("ascii")
+    payload = (command + "\n").encode("ascii")
     try:
         local_client = QLocalSocket()
         local_client.connectToServer(IPC_SERVER_NAME)
