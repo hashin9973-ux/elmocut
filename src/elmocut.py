@@ -380,10 +380,10 @@ if __name__ == "__main__":
                     state["handled"] = True
                     if command == b"READY":
                         # Confirms that the elevated GUI's IPC server is live.
-                        connection.write(b"OK\\n")
+                        connection.write(b"OK\n")
                     elif command == b"PING":
                         # Acknowledge receipt; the existing GUI owns the scan.
-                        connection.write(b"OK\\n")
+                        connection.write(b"OK\n")
                         QTimer.singleShot(0, run_ping_scan_when_idle)
                     elif command == b"BACKGROUND":
                         GUI.background_mode = True
