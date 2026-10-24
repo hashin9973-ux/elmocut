@@ -84,12 +84,9 @@ class Scanner():
                     port for port in open_ports
                     if isinstance(port, int) and 1 <= port <= 65535
                 ],
-                avg_ping_ms=(
-                    float(record["avg_ping_ms"])
-                    if isinstance(record.get("avg_ping_ms"), (int, float))
-                    and 0 <= record["avg_ping_ms"] < 60000
-                    else None
-                ),
+                # Inventory records are restored as unavailable, so do not
+                # present a latency from an earlier session as a current ping.
+                avg_ping_ms=None,
                 name=nickname,
                 admin=False,
                 online=False,
@@ -348,6 +345,7 @@ class Scanner():
             if not confirmed_online:
                 cache_only_macs.add(mac)
                 if previous is not None:
+                    previous.avg_ping_ms = None
                     if credible_advanced_result:
                         misses = self.missed_advanced_scans.get(mac, 0) + 1
                         self.missed_advanced_scans[mac] = misses
@@ -424,11 +422,11 @@ class Scanner():
             if mac in seen_macs:
                 continue
             if credible_advanced_result:
+                device.avg_ping_ms = None
                 misses = self.missed_advanced_scans.get(mac, 0) + 1
                 self.missed_advanced_scans[mac] = misses
                 if misses >= 3:
                     device.online = False
-                    device.avg_ping_ms = None
             self.devices.append(device)
 
         # Retain watched devices that have not yet appeared in Scanner.devices.
@@ -438,6 +436,7 @@ class Scanner():
             window = self.parent.device_windows.get(mac)
             if window and window.device:
                 if credible_advanced_result:
+                    window.device.avg_ping_ms = None
                     misses = self.missed_advanced_scans.get(mac, 0) + 1
                     self.missed_advanced_scans[mac] = misses
                     if misses >= 3:
