@@ -268,10 +268,23 @@ if __name__ == "__main__":
         # Listen on a Windows local socket for CLI commands. Keep a loopback
         # TCP listener as a compatibility path for older installed builds.
         local_ipc_server = QLocalServer()
-        if local_ipc_server.listen(IPC_SERVER_NAME):
-            startup_log(f"Local IPC listener listening as {IPC_SERVER_NAME}")
+        # Permit same-user commands from the unelevated CLI launcher when the
+        # GUI itself is elevated. Without an explicit user ACL, Windows can
+        # reject the local-pipe connection across integrity levels.
+        local_ipc_server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
+        if not local_ipc_server.listen(IPC_SERVER_NAME):
+            first_error = local_ipc_server.errorString()
+            # A previous crash may leave a stale local-server name behind.
+            QLocalServer.removeServer(IPC_SERVER_NAME)
+            if not local_ipc_server.listen(IPC_SERVER_NAME):
+                startup_log(
+                    f"Local IPC listener failed after stale-name cleanup: "
+                    f"{first_error}; {local_ipc_server.errorString()}"
+                )
+            else:
+                startup_log(f"Local IPC listener recovered as {IPC_SERVER_NAME}")
         else:
-            startup_log(f"Local IPC listener failed: {local_ipc_server.errorString()}")
+            startup_log(f"Local IPC listener listening as {IPC_SERVER_NAME}")
 
         ipc_server = QTcpServer()
         if not ipc_server.listen(QHostAddress(IPC_HOST), IPC_PORT):
@@ -288,8 +301,19 @@ if __name__ == "__main__":
             # Keep the current visible/hidden state when the CLI pings an
             # already running instance; do not steal focus. Force skips only
             # the default-gateway check, not the actual scan operation.
-            started = GUI.scanHard(silent=True, force=True)
-            startup_log(f"Existing-instance --ping scan accepted: {started}")
+            try:
+                started = GUI.scanHard(silent=True, force=True)
+                startup_log(f"Existing-instance --ping scan started: {started}")
+                if not started:
+                    startup_log(
+                        "Existing-instance --ping was not started; "
+                        "the scan starter returned False"
+                    )
+            except Exception:
+                startup_log(
+                    "Existing-instance --ping scan start exception:\\n"
+                    + traceback.format_exc()
+                )
 
         def accept_cli_connections(server):
             while server.hasPendingConnections():
@@ -349,10 +373,19 @@ if __name__ == "__main__":
 
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
-                    GUI.scanHard(silent=background_mode, force=ping_scan)
+                    started = GUI.scanHard(silent=background_mode, force=True)
+                    startup_log(f"Initial --ping scan started: {started}")
+                    if not started:
+                        raise RuntimeError("The requested --ping scan did not start")
+                elif background_mode:
+                    # Startup in tray should be idle: don't launch a network
+                    # sweep just because Windows signed in.
+                    GUI._startup_scan_deferred = True
+                    startup_log("Tray startup: initial network scan deferred")
                 else:
                     startup_log("Starting initial easy scan")
-                    GUI.scanEasy(silent=background_mode)
+                    started = GUI.scanEasy(silent=False)
+                    startup_log(f"Initial easy scan started: {started}")
 
                 startup_log("Version update checks are disabled")
                 startup_state["ready"] = True
