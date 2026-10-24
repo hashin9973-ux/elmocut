@@ -347,6 +347,7 @@ if __name__ == "__main__":
 
         startup_state = {
             "ready": False,
+            "startup_failed": False,
             "ping_pending": False,
             "ping_active": False,
         }
@@ -388,6 +389,12 @@ if __name__ == "__main__":
         def run_ping_scan_when_idle():
             # Hold one pending request until startup and any current scan finish.
             if not startup_state["ping_pending"]:
+                return
+            if startup_state["startup_failed"]:
+                startup_state["ping_pending"] = False
+                startup_log(
+                    "Discarding queued --ping request because GUI initialization failed"
+                )
                 return
             if not startup_state["ready"] or GUI.scan_thread.isRunning():
                 QTimer.singleShot(150, run_ping_scan_when_idle)
@@ -472,7 +479,14 @@ if __name__ == "__main__":
                         connection.write(b"ERROR\n")
 
                     connection.flush()
-                    connection.disconnectFromHost()
+                    # QLocalSocket calls this disconnectFromServer(); TCP
+                    # sockets use disconnectFromHost(). Support both listeners.
+                    if hasattr(connection, "disconnectFromServer"):
+                        connection.disconnectFromServer()
+                    elif hasattr(connection, "disconnectFromHost"):
+                        connection.disconnectFromHost()
+                    else:
+                        connection.close()
 
                 connection.readyRead.connect(handle_cli_request)
                 if connection.bytesAvailable():
@@ -495,8 +509,11 @@ if __name__ == "__main__":
         def initialize_gui():
             try:
                 startup_log("Deferred GUI initialization started")
-                startup_log("Calling GUI.resizeEvent")
-                GUI.resizeEvent()
+                # resizeEvent requires Qt's QResizeEvent argument and must not
+                # be called manually. Invoke only the table-sizing helper here;
+                # Qt will dispatch resizeEvent normally when the window resizes.
+                startup_log("Sizing device table columns")
+                GUI.resizeTableColumns()
                 startup_log("Initializing scanner")
                 GUI.scanner.init()
                 startup_log("Scanner initialized")
@@ -534,6 +551,10 @@ if __name__ == "__main__":
                     GUI.activateWindow()
             except Exception:
                 details = traceback.format_exc()
+                startup_state["startup_failed"] = True
+                startup_state["ready"] = False
+                startup_state["ping_pending"] = False
+                startup_state["ping_active"] = False
                 startup_log("STARTUP EXCEPTION:\n" + details)
                 print(details)
                 if not background_mode:
