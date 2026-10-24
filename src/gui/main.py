@@ -23,6 +23,7 @@ from assets import *
 from bridge import ScanThread
 
 from constants import *
+import gc
 import os
 import signal
 import sys
@@ -58,6 +59,9 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.ip_forwarding_enabled = False
 
         self.from_tray = False
+        self._table_cleared_for_tray = False
+        self._pending_table_refresh = False
+        self._startup_scan_deferred = False
 
         # Threading
         self.scan_thread = ScanThread()
@@ -209,10 +213,16 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         # Restore window state if was minimized before hidden.
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.activateWindow()
-        if getattr(self, "_startup_scan_deferred", False):
+        if (
+            self._startup_scan_deferred
+            or self._pending_table_refresh
+            or self._table_cleared_for_tray
+        ):
             self._startup_scan_deferred = False
-            # Display the persisted last-known inventory without forcing an
-            # automatic network sweep merely because the tray icon was opened.
+            self._pending_table_refresh = False
+            self._table_cleared_for_tray = False
+            # Rebuild visible rows from the persisted in-memory inventory only
+            # when the user opens the window, not while hidden in the tray.
             self.processDevices()
 
     def tray_clicked(self, event):
@@ -285,6 +295,12 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         # so "minimize to tray" really leaves no app windows on the desktop.
         for window in list(self.device_windows.values()):
             window.hide()
+        # Release the per-cell Qt objects while hidden. Device data itself
+        # remains in Scanner.devices and is redrawn on restore or after a scan.
+        self.tableScan.clearContents()
+        self.tableScan.setRowCount(0)
+        self._table_cleared_for_tray = True
+        gc.collect()
 
     def quit_all(self):
         self.stop_all_watching() 
@@ -748,7 +764,12 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.centralwidget.setEnabled(True)
         self.pgbar.setVisible(False)
         if success:
-            self.processDevices()
+            if self.isVisible():
+                self.processDevices()
+            else:
+                # Keep the inventory in the scanner model, not thousands of
+                # Qt table items while the application is resident in the tray.
+                self._pending_table_refresh = True
         else:
             self.log('Scan failed. See console output for details.', 'red')
         self.silent_scan = bool(self.background_mode)
