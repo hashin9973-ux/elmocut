@@ -84,6 +84,12 @@ class Scanner():
                     port for port in open_ports
                     if isinstance(port, int) and 1 <= port <= 65535
                 ],
+                avg_ping_ms=(
+                    float(record["avg_ping_ms"])
+                    if isinstance(record.get("avg_ping_ms"), (int, float))
+                    and 0 <= record["avg_ping_ms"] < 60000
+                    else None
+                ),
                 name=nickname,
                 admin=False,
                 online=False,
@@ -109,6 +115,7 @@ class Scanner():
                 "vendor": device.vendor,
                 "hostname": device.hostname,
                 "open_ports": list(getattr(device, "open_ports", [])),
+                "avg_ping_ms": getattr(device, "avg_ping_ms", None),
             })
         try:
             os.makedirs(os.path.dirname(self._inventory_path), exist_ok=True)
@@ -219,7 +226,8 @@ class Scanner():
         hostnames=None,
         mark_missing_offline=False,
         port_results=None,
-        online_ips=None
+        online_ips=None,
+        ping_results=None
     ):
         """
         Merge scan evidence without dropping known devices after a partial pass.
@@ -233,6 +241,8 @@ class Scanner():
         hostnames = hostnames or {}
         has_port_results = port_results is not None
         port_results = port_results or {}
+        has_ping_results = ping_results is not None
+        ping_results = ping_results or {}
         confirmed_ips = None if online_ips is None else set(online_ips)
         previous_devices = {
             device.mac: device for device in self.devices
@@ -311,6 +321,7 @@ class Scanner():
                             dtype=DeviceType.USER,
                             hostname=hostnames.get(ip, ""),
                             open_ports=sorted(set(port_results.get(ip, []))),
+                            avg_ping_ms=None,
                             name=nickname,
                             admin=False,
                             online=False
@@ -350,6 +361,12 @@ class Scanner():
                         else list(getattr(previous, "open_ports", []))
                         if previous is not None else []
                     ),
+                    avg_ping_ms=(
+                        ping_results.get(ip)
+                        if has_ping_results
+                        else getattr(previous, "avg_ping_ms", None)
+                        if previous is not None else None
+                    ),
                     name=nickname,
                     admin=False,
                     online=True
@@ -366,6 +383,7 @@ class Scanner():
                 self.missed_advanced_scans[mac] = misses
                 if misses >= 3:
                     device.online = False
+                    device.avg_ping_ms = None
             self.devices.append(device)
 
         # Retain watched devices that have not yet appeared in Scanner.devices.
@@ -535,26 +553,41 @@ class Scanner():
         # implementation using documented discovery methods, not copied code
         # from Advanced IP Scanner.
         def ping_target(ip):
+            """Return response status and mean RTT from successful ICMP replies."""
             try:
                 result = subprocess.run(
-                    ["ping", "-n", "2", "-w", "450", ip],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=2.0,
+                    ["ping", "-n", "3", "-w", "400", ip],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=2.5,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 )
-                return result.returncode == 0
+                samples = [
+                    float(value)
+                    for value in re.findall(
+                        r"time[=<]\s*(\d+(?:\.\d+)?)\s*ms",
+                        result.stdout,
+                        re.IGNORECASE
+                    )
+                ]
+                average_ms = round(sum(samples) / len(samples), 2) if samples else None
+                return result.returncode == 0 or bool(samples), average_ms
             except (OSError, subprocess.SubprocessError):
-                return False
+                return False, None
 
         ping_alive = set()
+        ping_results = {}
         with ThreadPoolExecutor(max_workers=64) as executor:
             futures = {executor.submit(ping_target, ip): ip for ip in target_ips}
             for completed, future in enumerate(as_completed(futures), start=1):
                 ip = futures[future]
                 try:
-                    if future.result():
+                    is_alive, average_ms = future.result()
+                    if is_alive:
                         ping_alive.add(ip)
+                    if average_ms is not None:
+                        ping_results[ip] = average_ms
                 except Exception as exc:
                     print(f"[Scanner] Ping task for {ip} failed: {exc}")
                 self.qt_progress_signal(min(140, int(140 * completed / len(target_ips))))
@@ -712,7 +745,8 @@ class Scanner():
             hostnames,
             mark_missing_offline=True,
             port_results=open_ports_by_ip,
-            online_ips=responsive_ips
+            online_ips=responsive_ips,
+            ping_results=ping_results
         )
         self.qt_progress_signal(253)
 
