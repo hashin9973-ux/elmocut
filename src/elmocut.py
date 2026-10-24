@@ -286,8 +286,10 @@ if __name__ == "__main__":
                 return
 
             # Keep the current visible/hidden state when the CLI pings an
-            # already running instance; do not steal focus.
-            GUI.scanHard(silent=True)
+            # already running instance; do not steal focus. Force skips only
+            # the default-gateway check, not the actual scan operation.
+            started = GUI.scanHard(silent=True, force=True)
+            startup_log(f"Existing-instance --ping scan accepted: {started}")
 
         def accept_cli_connections(server):
             while server.hasPendingConnections():
@@ -347,7 +349,7 @@ if __name__ == "__main__":
 
                 if ping_scan:
                     startup_log("Starting requested hard/ping scan")
-                    GUI.scanHard(silent=background_mode)
+                    GUI.scanHard(silent=background_mode, force=ping_scan)
                 else:
                     startup_log("Starting initial easy scan")
                     GUI.scanEasy(silent=background_mode)
