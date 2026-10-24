@@ -39,7 +39,7 @@
     <item row="0" column="0">
      <layout class="QGridLayout" name="gridLayout" columnstretch="0,0,0,0,0,0,0,0,0">
       <property name="sizeConstraint">
-       <enum>QLayout::SetFixedSize</enum>
+       <enum>QLayout::SetMinimumSize</enum>
       </property>
       <property name="spacing">
        <number>6</number>
@@ -401,7 +401,7 @@
          <enum>QAbstractItemView::SelectRows</enum>
         </property>
         <property name="textElideMode">
-         <enum>Qt::ElideNone</enum>
+         <enum>Qt::ElideRight</enum>
         </property>
         <property name="showGrid">
          <bool>false</bool>
