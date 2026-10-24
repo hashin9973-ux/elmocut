@@ -4,8 +4,14 @@ class Device:
         self.mac = kwargs['mac']
         self.vendor = kwargs['vendor']
         self.type = kwargs['dtype']
+        self.hostname = kwargs.get('hostname', '')
+        # Ports observed open during the latest advanced discovery scan.
+        self.open_ports = list(kwargs.get('open_ports', []))
         self.name = kwargs['name']
         self.admin = kwargs['admin']
+        self.online = kwargs.get('online', True)
+        # Mean of successful ICMP replies during the latest measurement, ms.
+        self.avg_ping_ms = kwargs.get('avg_ping_ms', None)
 
     def __str__(self):
         return f"Device(name={self.name}, ip={self.ip}, mac={self.mac})"

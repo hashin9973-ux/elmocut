@@ -24,20 +24,127 @@ def npcap_exists():
     """
     return path.exists(NPCAP_PATH)
 
-def duplicate_elmocut():
+# A named mutex is a race-safe single-instance guard. Counting tasklist rows
+# is unreliable while the unelevated launcher and elevated app overlap.
+_INSTANCE_MUTEX_NAME = "Local\\elmoCut.SingleInstance.v2"
+_INSTANCE_MUTEX_HANDLE = None
+_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+_KERNEL32.CreateMutexW.restype = ctypes.c_void_p
+_KERNEL32.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_wchar_p]
+_KERNEL32.OpenMutexW.restype = ctypes.c_void_p
+_KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
+_KERNEL32.CloseHandle.restype = ctypes.c_bool
+_KERNEL32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+_KERNEL32.ReleaseMutex.restype = ctypes.c_bool
+_KERNEL32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+_KERNEL32.WaitForSingleObject.restype = ctypes.c_ulong
+
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_ABANDONED = 0x00000080
+_WAIT_TIMEOUT = 0x00000102
+_ERROR_ALREADY_EXISTS = 183
+_ERROR_FILE_NOT_FOUND = 2
+_MUTEX_ACCESS = 0x00100000 | 0x0001  # SYNCHRONIZE | MUTEX_MODIFY_STATE
+
+
+def single_instance_exists():
+    """Return True only when the mutex is actively owned by another process.
+
+    A named mutex handle can exist without an owner. Merely opening it leads to
+    false 'already running' reports after a released/abandoned instance.
     """
-    Check if there is more than 1 instance of elmoCut.exe
-    """
-    tasklist = terminal('tasklist')
-    return tasklist.lower().count('elmocut.exe') > 1
+    handle = _KERNEL32.OpenMutexW(_MUTEX_ACCESS, False, _INSTANCE_MUTEX_NAME)
+    if not handle:
+        # Access denied means a protected instance may exist; a missing name
+        # means no instance guard object exists.
+        return ctypes.get_last_error() != _ERROR_FILE_NOT_FOUND
+
+    try:
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result == _WAIT_TIMEOUT:
+            return True
+        if wait_result in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.ReleaseMutex(handle)
+            return False
+        return True
+    finally:
+        _KERNEL32.CloseHandle(handle)
+
+
+def acquire_single_instance():
+    """Acquire the named mutex, recovering an existing but currently free object."""
+    global _INSTANCE_MUTEX_HANDLE
+
+    # Prevent a stale Win32 error from causing a newly created mutex to be
+    # misidentified as a pre-existing instance.
+    ctypes.set_last_error(0)
+    handle = _KERNEL32.CreateMutexW(None, True, _INSTANCE_MUTEX_NAME)
+    last_error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(last_error)
+
+    if last_error == _ERROR_ALREADY_EXISTS:
+        # CreateMutex does not grant ownership when the object already exists.
+        # Try to acquire it: timeout means another instance really owns it.
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.CloseHandle(handle)
+            if wait_result == _WAIT_TIMEOUT:
+                return False
+            raise ctypes.WinError(ctypes.get_last_error() or 1)
+
+    _INSTANCE_MUTEX_HANDLE = handle
+    return True
+
+
+
+_LAUNCHER_MUTEX_NAME = "Local\\elmoCut.Launcher.v1"
+_LAUNCHER_MUTEX_HANDLE = None
+
+
+def acquire_launcher_mutex():
+    """Serialize unelevated launchers while they request an elevated GUI."""
+    global _LAUNCHER_MUTEX_HANDLE
+    ctypes.set_last_error(0)
+    handle = _KERNEL32.CreateMutexW(None, True, _LAUNCHER_MUTEX_NAME)
+    last_error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(last_error)
+    if last_error == _ERROR_ALREADY_EXISTS:
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.CloseHandle(handle)
+            if wait_result == _WAIT_TIMEOUT:
+                return False
+            raise ctypes.WinError(ctypes.get_last_error() or 1)
+    _LAUNCHER_MUTEX_HANDLE = handle
+    return True
+
+
+def release_launcher_mutex():
+    """Release the temporary launch lock after the GUI claims its own mutex."""
+    global _LAUNCHER_MUTEX_HANDLE
+    handle = _LAUNCHER_MUTEX_HANDLE
+    if handle:
+        _LAUNCHER_MUTEX_HANDLE = None
+        _KERNEL32.ReleaseMutex(handle)
+        _KERNEL32.CloseHandle(handle)
+
+def release_single_instance():
+    """Release ownership before the controlled --restarting hand-off."""
+    global _INSTANCE_MUTEX_HANDLE
+    handle = _INSTANCE_MUTEX_HANDLE
+    if handle:
+        _INSTANCE_MUTEX_HANDLE = None
+        _KERNEL32.ReleaseMutex(handle)
+        _KERNEL32.CloseHandle(handle)
 
 def check_documents_dir():
     """
-    Check if documents folder exists in order to store settings
+    Ensure the settings directory exists.
     """
     makedirs(DOCUMENTS_PATH, exist_ok=True)
-    if not path.exists(SETTINGS_PATH):
-        export_settings()
 
 def _import_settings_unlocked():
     """
@@ -45,7 +152,13 @@ def _import_settings_unlocked():
     Only call this from inside a block that already holds _settings_lock.
     """
     check_documents_dir()
-    return load(open(SETTINGS_PATH))
+    if not path.exists(SETTINGS_PATH):
+        # This function is called while _settings_lock is held. Use the
+        # unlocked writer to avoid trying to acquire the same non-reentrant
+        # lock a second time during first-run settings creation.
+        _export_settings_unlocked()
+    with open(SETTINGS_PATH, encoding='utf-8') as settings_file:
+        return load(settings_file)
 
 def _export_settings_unlocked(values=None):
     """
@@ -117,35 +230,33 @@ def migrate_settings_file():
             print(f'Migrating settings error: {e}')
             print('New settings file created instead.')
 
-def add_to_startup(exe_path):
+def add_to_startup(command):
     """
-    Add elmoCut to autostart
+    Register the full quoted Windows command for the current user's startup.
+    The value may include arguments such as --background.
     """
-    key = winreg.OpenKey(
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER,
+        HKEY_AUTOSTART_PATH,
+        0,
+        winreg.KEY_SET_VALUE
+    ) as key:
+        winreg.SetValueEx(key, 'elmocut', 0, winreg.REG_SZ, command)
+
+
+def remove_from_startup():
+    """Remove elmoCut from the current user's startup registration."""
+    try:
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             HKEY_AUTOSTART_PATH,
             0,
             winreg.KEY_SET_VALUE
-        )
-    winreg.SetValueEx(
-        key,
-        'elmocut',
-        0,
-        winreg.REG_SZ, exe_path
-    )
-
-def remove_from_startup():
-    """
-    Remove elmoCut from autostart
-    """
-    key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            HKEY_AUTOSTART_PATH,
-            0,
-            winreg.KEY_WRITE
-        )
-    try:
-        winreg.DeleteValue(key, 'elmocut')
+        ) as key:
+            try:
+                winreg.DeleteValue(key, 'elmocut')
+            except FileNotFoundError:
+                pass
     except FileNotFoundError:
         pass
 
@@ -163,14 +274,27 @@ def restart_gui_app(_app):
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
 
-    subprocess.Popen(
-        args,
-        creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    # Free the single-instance guard before the replacement process starts.
+    # Otherwise the new process would correctly mistake this restart for a
+    # duplicate launch and refuse to open.
+    release_single_instance()
+
+    try:
+        subprocess.Popen(
+            args,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        # Restore the guard if relaunching failed, keeping this process usable.
+        try:
+            acquire_single_instance()
+        except Exception:
+            pass
+        raise
 
     _app.from_tray = True   # bypass minimize-to-tray on close
     _app.close()

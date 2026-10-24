@@ -1,3 +1,5 @@
+import os
+import subprocess
 from scapy.all import conf, get_if_list, get_if_hwaddr
 from scapy.arch.windows import get_windows_if_list
 from subprocess import check_output, CalledProcessError
@@ -15,7 +17,16 @@ def terminal(command, shell=True, decode=True):
     Terminal commands via Subprocess
     """
     try:
-        cmd = check_output(command, shell=shell)
+        # Keep shell commands launched by the GUI app from creating console
+        # windows (notably per-address ping commands used by Ping Scan).
+        options = {}
+        if os.name == 'nt':
+            options['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            options['startupinfo'] = startupinfo
+        cmd = check_output(command, shell=shell, **options)
         return cmd.decode() if decode else None
     except CalledProcessError as e:
         print(f'[terminal] Command failed: {command!r} -> {e}')

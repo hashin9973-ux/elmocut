@@ -1,14 +1,13 @@
 from qdarkstyle import load_stylesheet
 from pyperclip import copy
 
-from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, \
+from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, QStyle, \
                             QMenu, QSystemTrayIcon
-from PyQt6.QtGui import QPixmap, QIcon, QAction
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPixmap, QIcon, QAction, QColor
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from ui.ui_main import Ui_MainWindow
 
 from gui.settings import Settings
-from gui.about import About
 from gui.device import DeviceWindow
 
 from networking.scanner import Scanner
@@ -21,9 +20,10 @@ from tools.utils import goto, is_connected
 
 from assets import *
 
-from bridge import ScanThread, UpdateThread
+from bridge import ScanThread
 
 from constants import *
+import gc
 import os
 import signal
 import sys
@@ -48,46 +48,53 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         
         # Main Props
         self.watched_devices: dict[str, ElmoDivert] = {}
+        self.background_mode = False
+        self.silent_scan = False
         self.scanner = Scanner(self)
         self.killer = Killer()
 
         # Settings props
         self.minimize = True
         self.remember = False
-        self.autoupdate = True
         self.ip_forwarding_enabled = False
 
         self.from_tray = False
+        self._table_cleared_for_tray = False
+        self._pending_table_refresh = False
+        self._startup_scan_deferred = False
 
         # Threading
         self.scan_thread = ScanThread()
         self.scan_thread.thread_finished.connect(self.ScanThread_Reciever)
+        self.scan_thread.scan_error.connect(self.ScanThread_Error)
         self.scan_thread.progress.connect(self.pgbar.setValue)
 
-        self.update_thread = UpdateThread()
-        self.update_thread.thread_finished.connect(self.UpdateThread_Reciever)
         
         # Initialize other sub-windows
         self.settings_window = Settings(self, self.icon)
-        self.about_window = About(self, self.icon)
         self.device_windows: dict[str, DeviceWindow] = {}
 
         # Connect buttons
         self.buttons = [
             (self.btnScanEasy,   self.scanEasy,      scan_easy_icon,  'Arping Scan'),
             (self.btnScanHard,   self.scanHard,      scan_hard_icon,  'Pinging Scan'),
+            (self.btnScanAdvanced, self.scanAdvanced, scan_hard_icon, 'Advanced Discovery Scan (ARP + repeated ICMP + TCP service probes + device-name detection)'),
             (self.btnKill,       self.kill,          kill_icon,       'Kill selected device'),
             (self.btnUnkill,     self.unkill,        unkill_icon,     'Un-kill selected device'),
             (self.btnKillAll,    self.killAll,       killall_icon,    'Kill all devices'),
             (self.btnUnkillAll,  self.unkillAll,     unkillall_icon,  'Un-kill all devices'),
             (self.btnSettings,   self.openSettings,  settings_icon,   'View elmoCut settings'),
-            (self.btnAbout,      self.openAbout,     about_icon,      'About elmoCut')
         ] 
         
         for btn, btn_func, btn_icon, btn_tip in self.buttons:
             btn.setToolTip(btn_tip)
             btn.clicked.connect(btn_func)
             btn.setIcon(self.processIcon(btn_icon))
+
+        # Give the advanced discovery action a distinct built-in network icon.
+        self.btnScanAdvanced.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DriveNetIcon)
+        )
 
         clickable(self.lblDonate).connect(self.buymeacoffee)
         self.setImage(self.lblDonate, donate_icon)
@@ -101,7 +108,16 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tableScan.setColumnCount(len(TABLE_HEADER_LABELS))
         self.tableScan.verticalHeader().setVisible(False)
         self.tableScan.setHorizontalHeaderLabels(TABLE_HEADER_LABELS)
+        # Let all seven columns fit in the available viewport. The generated UI
+        # sets a 170 px minimum per section, which clips the right-hand columns
+        # (including Nickname) on the default 870 px window.
+        self.tableScan.horizontalHeader().setMinimumSectionSize(32)
+        self.tableScan.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.tableScan.setWordWrap(False)
         self.tableScan.setShowGrid(False)
+        # Restore window geometry and column sizing from the previous session.
+        self._ui_state = QSettings("elmoCut", "elmoCut")
+        self.restoreUiState()
         # self.tableScan.setStyleSheet("QTableWidget::item { border: none; }")
 
         '''
@@ -136,6 +152,8 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tray_icon.activated.connect(self.tray_clicked)
 
         self.applySettings()
+        # Run once after the first layout pass so the initial window also fits.
+        QTimer.singleShot(0, self.applyInitialTableSizing)
     
     @staticmethod
     def processIcon(icon_data):
@@ -180,14 +198,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.settings_window.show()
         self.settings_window.setWindowState(Qt.WindowState.WindowNoState)
 
-    def openAbout(self):
-        """
-        Open about window
-        """
-        self.about_window.hide()
-        self.about_window.show()
-        self.about_window.setWindowState(Qt.WindowState.WindowNoState)
-
     def applySettings(self):
         """
         Apply saved settings
@@ -195,10 +205,25 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.settings_window.updateElmocutSettings()
 
     def trayShowClicked(self):
+        # Explicitly showing the UI switches this session back to interactive
+        # mode; future user-started scans may show normal error dialogs again.
+        self.background_mode = False
+        self.silent_scan = False
         self.show()
-        # Restore window state if was minimized before hidden
+        # Restore window state if was minimized before hidden.
         self.setWindowState(Qt.WindowState.WindowNoState)
         self.activateWindow()
+        if (
+            self._startup_scan_deferred
+            or self._pending_table_refresh
+            or self._table_cleared_for_tray
+        ):
+            self._startup_scan_deferred = False
+            self._pending_table_refresh = False
+            self._table_cleared_for_tray = False
+            # Rebuild visible rows from the persisted in-memory inventory only
+            # when the user opens the window, not while hidden in the tray.
+            self.processDevices()
 
     def tray_clicked(self, event):
         """
@@ -229,19 +254,86 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
                 'yellow'
             )
 
+    def saveUiState(self):
+        """Persist main-window geometry and user-adjusted table columns."""
+        try:
+            self._ui_state.setValue("main/geometry", self.saveGeometry())
+            self._ui_state.setValue(
+                "main/table_column_widths",
+                [self.tableScan.columnWidth(i) for i in range(self.tableScan.columnCount())]
+            )
+            self._ui_state.sync()
+        except Exception as exc:
+            print(f"[elmoCut] Could not save window state: {exc}")
+
+    def applyInitialTableSizing(self):
+        """Restore saved column widths when they fit; otherwise use responsive sizing."""
+        try:
+            saved = self._ui_state.value("main/table_column_widths", [])
+            if isinstance(saved, str):
+                saved = [part for part in saved.strip("[]").split(",") if part.strip()]
+            widths = [int(value) for value in saved]
+            if (
+                len(widths) == self.tableScan.columnCount()
+                and all(width >= 32 for width in widths)
+                and sum(widths) <= self.tableScan.viewport().width()
+            ):
+                for index, width in enumerate(widths):
+                    self.tableScan.setColumnWidth(index, width)
+                return
+        except (TypeError, ValueError):
+            pass
+        self.resizeTableColumns()
+
+    def restoreUiState(self):
+        """Restore saved geometry and column widths, tolerating stale settings."""
+        try:
+            geometry = self._ui_state.value("main/geometry")
+            if geometry:
+                self.restoreGeometry(geometry)
+            widths = self._ui_state.value("main/table_column_widths", [])
+            if isinstance(widths, str):
+                widths = [part for part in widths.strip("[]").split(",") if part.strip()]
+            if isinstance(widths, (list, tuple)):
+                for index, width in enumerate(widths[:self.tableScan.columnCount()]):
+                    try:
+                        self.tableScan.setColumnWidth(index, max(32, int(width)))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:
+            print(f"[elmoCut] Could not restore window state: {exc}")
+
     def hide_all(self):
         """
         Hide option for tray (Hides window and settings)
         """
+        self.saveUiState()
         self.hide()
         self.settings_window.hide()
-        self.about_window.hide()
+        # Device detail windows are separate top-level windows; hide them too
+        # so "minimize to tray" really leaves no app windows on the desktop.
+        for mac, window in list(self.device_windows.items()):
+            if mac in self.watched_devices:
+                # Keep live watch windows allocated so their callbacks remain
+                # connected, but never leave them visible in tray mode.
+                window.hide()
+            else:
+                # Unwatched detail windows hold only UI/cache state; discard
+                # them and recreate on demand rather than retaining each one.
+                window.close()
+                window.deleteLater()
+                self.device_windows.pop(mac, None)
+        # Release the per-cell Qt objects while hidden. Device data itself
+        # remains in Scanner.devices and is redrawn on restore or after a scan.
+        self.tableScan.clearContents()
+        self.tableScan.setRowCount(0)
+        self._table_cleared_for_tray = True
+        gc.collect()
 
     def quit_all(self):
         self.stop_all_watching() 
         self.killer.unkill_all()
         self.settings_window.close()
-        self.about_window.close()
         for window in list(self.device_windows.values()):
             window.close()
         self.tray_icon.hide()
@@ -304,18 +396,33 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         return True
 
-    def resizeEvent(self, event=True):
-        """
-        Auto resize table widget columns dynamically
-        """
-        label_count = len(TABLE_HEADER_LABELS)
-        for i in range(label_count):
-            self.tableScan.setColumnWidth(i, self.tableScan.width() // label_count)
+    def resizeEvent(self, event):
+        """Keep table columns fitted to the currently available window width."""
+        super().resizeEvent(event)
+        self.resizeTableColumns()
+
+    def resizeTableColumns(self):
+        if not hasattr(self, "tableScan"):
+            return
+        # Wider network identifiers get more room; shorter fields stay compact.
+        weights = (0.95, 0.70, 1.35, 0.90, 0.62, 1.20, 1.05, 1.05)
+        available = self.tableScan.viewport().width()
+        # Avoid forcing minimum widths into an overflow when the layout is not
+        # ready yet; the initial single-shot call retries after layout activation.
+        if available < len(weights) * 32:
+            return
+        total_weight = sum(weights)
+        widths = [int(available * weight / total_weight) for weight in weights]
+        if widths:
+            widths[-1] += available - sum(widths)
+        for column, width in enumerate(widths):
+            self.tableScan.setColumnWidth(column, max(32, width))
 
     def closeEvent(self, event):
         """
         Run in background if self.minimize is True else exit
         """
+        self.saveUiState()
         # If event recieved from tray icon
         if self.from_tray:
             force_close()
@@ -334,7 +441,6 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.stop_all_watching()
         self.killer.unkill_all()
         self.settings_window.close()
-        self.about_window.close()
 
         for window in list(self.device_windows.values()):
             window.close()
@@ -358,19 +464,14 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         return self.scanner.devices[self.tableScan.currentRow()]
     
     def cellClicked(self, row, column):
-        """
-        Copy selected cell data to clipboard
-        """
-        # Get current row
+        """Copy the exact displayed cell value to the clipboard."""
         device = self.current_index()
-
-        # Get cell text using dict.values instead of .itemAt()
-        cell = list(device.to_dict().values())[column]
-        
-        if len(cell) > 20:
-            cell = cell[:20] + '...'
-        
+        values = self.device_table_values(device)
+        if not 0 <= column < len(values):
+            return
+        cell = str(values[column])
         self.lblcenter.setText(cell)
+        self.lblcenter.setToolTip(cell)
         copy(cell)
 
     def deviceClicked(self):
@@ -410,19 +511,57 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         window.activateWindow()
         window.raise_()
     
-    def fillTableCell(self, row, column, text, colors=[]):
-        # Center text in table cell
+    def fillTableCell(self, row, column, text, colors=None, foreground=None):
+        # Foreground fading is independent of the state background. An offline
+        # killed device therefore remains visibly red rather than becoming grey.
         ql = QTableWidgetItem()
-        ql.setText(text)
+        ql.setText(str(text))
         ql.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
         if colors:
             colored_item(ql, *colors)
-        
-        # Add cell to the specific location
+        if foreground:
+            ql.setForeground(QColor(foreground))
+        # Long values are elided in the fitted column, but remain available on
+        # hover so responsive sizing never hides data permanently.
+        ql.setToolTip(str(text))
+
         self.tableScan.setItem(row, column, ql)
 
+    @staticmethod
+    def device_table_values(device):
+        """Return values in the same explicit order as TABLE_HEADER_LABELS."""
+        port_names = {
+            21: 'FTP', 22: 'SSH', 23: 'Telnet', 53: 'DNS',
+            80: 'HTTP', 135: 'RPC', 139: 'NetBIOS', 443: 'HTTPS',
+            445: 'SMB', 554: 'RTSP', 3389: 'RDP', 5900: 'VNC',
+            8080: 'HTTP-alt', 9100: 'Printer'
+        }
+        dtype = getattr(device.type, 'value', device.type)
+        nickname = device.name if device.name not in ('', None, '-') else '-'
+        average_ping = getattr(device, 'avg_ping_ms', None)
+        ping_text = (
+            f'{average_ping:.1f} ms'
+            if isinstance(average_ping, (int, float)) and not isinstance(average_ping, bool)
+            else '-'
+        )
+        return [
+            device.ip,
+            ping_text,
+            device.mac,
+            device.vendor,
+            dtype,
+            device.hostname or '-',
+            ', '.join(
+                f'{port}/{port_names.get(port, "TCP")}'
+                for port in getattr(device, 'open_ports', [])
+            ) or '-',
+            nickname,
+        ]
+
     def fillTableRow(self, row, device: Device):
+        # Preserve state backgrounds and their contrast. For ordinary
+        # unavailable rows, use a clear text-only fade rather than a grey fill.
         if device.admin:
             colors = ['#00ff00', '#000000']
         elif device.mac in self.watched_devices:
@@ -430,13 +569,13 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         elif device.mac in self.killer.killed:
             colors = ['#ff0000', '#ffffff']
         else:
-            colors = []
-        
-        props = device.to_dict()
-        del props['admin']
+            colors = None
 
-        for column, prop in enumerate(props.values()):
-            self.fillTableCell(row, column, prop, colors)
+        # #747474 is deliberately stronger than the previous #b5b5b5, which
+        # was too subtle against the dark table. Keep status-coloured rows crisp.
+        foreground = '#747474' if not device.online and colors is None else None
+        for column, value in enumerate(self.device_table_values(device)):
+            self.fillTableCell(row, column, value, colors, foreground)
 
     def showDevices(self):
         """
@@ -450,10 +589,15 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
             print(f'>> {device}')
             self.fillTableRow(row, device)
         
-        status = f'{len(self.scanner.devices) - 2} devices' \
+        user_devices = [device for device in self.scanner.devices if not device.admin]
+        online_count = sum(device.online for device in user_devices)
+        offline_count = len(user_devices) - online_count
+        unavailable_summary = f', {offline_count} unavailable' if offline_count else ''
+        status = f'{online_count} devices{unavailable_summary}' \
                  f' ({len(self.killer.killed)} killed)'
-        
-        status_tray = f'Devices Found: {len(self.scanner.devices) - 2}\n' \
+
+        status_tray = f'Devices Found: {online_count}\n' \
+                      f'Devices Unavailable: {offline_count}\n' \
                       f'Devices Killed: {len(self.killer.killed)}\n' \
                       f'Interface: {self.scanner.iface.name}'
         
@@ -588,25 +732,34 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.showDevices()
 
-    def scanEasy(self):
+    def scanEasy(self, silent=False):
         """
-        Easy Scan button connector
+        Easy Scan button connector.
         """
-        self.ScanThread_Starter()
+        self.ScanThread_Starter(silent=silent)
     
-    def scanHard(self):
+    def scanHard(self, silent=False, force=False):
         """
-        Hard Scan button connector
+        Existing ping scan button connector.
+        force=True lets the CLI request a LAN scan without relying on the
+        default-gateway heuristic, which can reject valid local-only networks.
         """
-        # Set correct max for progress bar
-        self.ScanThread_Starter(scan_type=1)
+        return self.ScanThread_Starter(scan_type=1, silent=silent, force=force)
 
-    def ScanThread_Starter(self, scan_type=0):
+    def scanAdvanced(self, silent=False):
         """
-        Scan Thread Starter
+        ARP + ICMP/TCP sweep with hostname enrichment.
         """
-        if not self.connected(show_msg_box=True):
-            return
+        self.ScanThread_Starter(scan_type=2, silent=silent)
+
+    def ScanThread_Starter(self, scan_type=0, silent=False, force=False):
+        """
+        Scan Thread Starter. A forced CLI scan bypasses only the gateway
+        connectivity heuristic; the scanner still validates its actual targets.
+        """
+        self.silent_scan = bool(silent or self.background_mode)
+        if not force and not self.connected(show_msg_box=not self.silent_scan):
+            return False
 
         self.centralwidget.setEnabled(False)
 
@@ -615,67 +768,46 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
 
         self.killer.unkill_all()
 
-        self.log(
-            ['Arping', 'Pinging'][scan_type] + ' your network...',
-            ['aqua', 'fuchsia'][scan_type]
-        )
+        scan_labels = {
+            0: ('Arping', 'aqua'),
+            1: ('Pinging', 'fuchsia'),
+            2: ('Advanced discovery', 'cyan')
+        }
+        scan_label, scan_color = scan_labels[scan_type]
+        self.log(scan_label + ' your network...', scan_color)
 
         self.pgbar.setVisible(True)
-        self.pgbar.setMaximum(self.scanner.device_count)
-        self.pgbar.setValue(self.scanner.device_count * (not scan_type))
+        self.pgbar.setMaximum(253 if scan_type == 2 else self.scanner.device_count)
+        self.pgbar.setValue(0 if scan_type == 2 else self.scanner.device_count * (not scan_type))
         
         self.scan_thread.scanner = self.scanner
         self.scan_thread.scan_type = scan_type
         self.scan_thread.start()
+        return True
 
-    def ScanThread_Reciever(self):
+    def ScanThread_Reciever(self, success=True):
         """
-        Scan Thread results reciever
+        Re-enable the UI after every scan and only refresh results on success.
         """
         self.centralwidget.setEnabled(True)
         self.pgbar.setVisible(False)
-        self.processDevices()
-    
-    def UpdateThread_Starter(self):
-        """
-        Update Thread starter
-        """
-        if self.autoupdate:
-            self.update_thread.prompt_if_latest = False
-            self.update_thread.start()
+        if success:
+            if self.isVisible():
+                self.processDevices()
+            else:
+                # Keep the inventory in the scanner model, not thousands of
+                # Qt table items while the application is resident in the tray.
+                self._pending_table_refresh = True
+        else:
+            self.log('Scan failed. See console output for details.', 'red')
+        self.silent_scan = bool(self.background_mode)
 
-    def UpdateThread_Reciever(self):
-        """
-        Update Thread reciever
-        """
-        new_version = self.update_thread.github_version
-        update_url = self.update_thread.url
-
-        if self.update_thread.check_failed:
-            if self.update_thread.prompt_if_latest:
-                return MsgType.WARN(self, 'Update Check Failed',
-                            'Could not reach GitHub to check for updates.\n'
-                            'Check your internet connection and try again.')
-        
-        elif new_version == 'None':
+    def ScanThread_Error(self, message):
+        if self.silent_scan or self.background_mode:
+            print(f'[Scan Failed] {message}')
+            self.log('Scan failed. See console output for details.', 'red')
             return
-        
-        elif new_version != VERSION:
-            if MsgType.INFO(
-                self,
-                'elmoCut Update Available',
-                'A new version is available.\n'
-                f'Do you want to download {new_version}?',
-                Buttons.YES | Buttons.NO
-            ) == Buttons.YES:
-                goto(update_url)
-        
-        elif new_version == VERSION and self.update_thread.prompt_if_latest:
-            MsgType.INFO(
-                self.settings_window,
-                'Check for update',
-                'You have the latest version installed.'
-            )
-    
+        QMessageBox.critical(self, 'Scan Failed', message)
+
     # Open BuyMeACoffee page
     buymeacoffee = lambda self: goto('https://www.buymeacoffee.com/elmoiv')

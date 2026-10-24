@@ -8,7 +8,7 @@ DOCUMENTS_PATH = path.join(environ['APPDATA'], 'elmocut')
 OLD_SETTINGS_PATH = path.join(OLD_DOCUMENTS_PATH, 'elmocut.json')
 SETTINGS_PATH = path.join(DOCUMENTS_PATH, 'elmocut.json')
 
-TABLE_HEADER_LABELS = ['IP Address', 'MAC Address', 'Vendor', 'Type', 'Nickname']
+TABLE_HEADER_LABELS = ['IP Address', 'Avg Ping', 'MAC Address', 'Vendor', 'Type', 'Device Name', 'Open Ports', 'Nickname']
 
 NPCAP_URL = 'https://nmap.org/npcap/dist/npcap-1.50.exe'
 
