@@ -98,6 +98,39 @@ def acquire_single_instance():
     return True
 
 
+
+_LAUNCHER_MUTEX_NAME = "Local\\\\elmoCut.Launcher.v1"
+_LAUNCHER_MUTEX_HANDLE = None
+
+
+def acquire_launcher_mutex():
+    """Serialize unelevated launchers while they request an elevated GUI."""
+    global _LAUNCHER_MUTEX_HANDLE
+    ctypes.set_last_error(0)
+    handle = _KERNEL32.CreateMutexW(None, True, _LAUNCHER_MUTEX_NAME)
+    last_error = ctypes.get_last_error()
+    if not handle:
+        raise ctypes.WinError(last_error)
+    if last_error == _ERROR_ALREADY_EXISTS:
+        wait_result = _KERNEL32.WaitForSingleObject(handle, 0)
+        if wait_result not in (_WAIT_OBJECT_0, _WAIT_ABANDONED):
+            _KERNEL32.CloseHandle(handle)
+            if wait_result == _WAIT_TIMEOUT:
+                return False
+            raise ctypes.WinError(ctypes.get_last_error() or 1)
+    _LAUNCHER_MUTEX_HANDLE = handle
+    return True
+
+
+def release_launcher_mutex():
+    """Release the temporary launch lock after the GUI claims its own mutex."""
+    global _LAUNCHER_MUTEX_HANDLE
+    handle = _LAUNCHER_MUTEX_HANDLE
+    if handle:
+        _LAUNCHER_MUTEX_HANDLE = None
+        _KERNEL32.ReleaseMutex(handle)
+        _KERNEL32.CloseHandle(handle)
+
 def release_single_instance():
     """Release ownership before the controlled --restarting hand-off."""
     global _INSTANCE_MUTEX_HANDLE
