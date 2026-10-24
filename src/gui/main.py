@@ -4,7 +4,7 @@ from pyperclip import copy
 from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, QStyle, \
                             QMenu, QSystemTrayIcon
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from ui.ui_main import Ui_MainWindow
 
 from gui.settings import Settings
@@ -145,6 +145,8 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tray_icon.activated.connect(self.tray_clicked)
 
         self.applySettings()
+        # Run once after the first layout pass so the initial window also fits.
+        QTimer.singleShot(0, self.resizeTableColumns)
     
     @staticmethod
     def processIcon(icon_data):
@@ -310,11 +312,18 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
     def resizeEvent(self, event):
         """Keep table columns fitted to the currently available window width."""
         super().resizeEvent(event)
+        self.resizeTableColumns()
+
+    def resizeTableColumns(self):
         if not hasattr(self, "tableScan"):
             return
         # Wider network identifiers get more room; shorter fields stay compact.
         weights = (0.95, 0.70, 1.35, 0.90, 0.62, 1.20, 1.05, 1.05)
-        available = max(0, self.tableScan.viewport().width())
+        available = self.tableScan.viewport().width()
+        # Avoid forcing minimum widths into an overflow when the layout is not
+        # ready yet; the initial single-shot call retries after layout activation.
+        if available < len(weights) * 32:
+            return
         total_weight = sum(weights)
         widths = [int(available * weight / total_weight) for weight in weights]
         if widths:
