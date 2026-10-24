@@ -55,7 +55,7 @@ class PingScanWorkerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "All 3 ping commands failed"):
             scanner.ping_scan()
         self.assertEqual(scanner._Scanner__ping_done, len(scanner.ips))
-        self.assertEqual(scanner.qt_progress_signal, [1, 2, 3])
+        self.assertEqual(scanner._test_progress, [1, 2, 3])
 
     def test_existing_ping_command_string_is_unchanged(self):
         scanner = Scanner.__new__(Scanner)
