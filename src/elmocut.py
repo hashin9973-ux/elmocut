@@ -247,6 +247,9 @@ if __name__ == "__main__":
         startup_log("Constructing ElmoCut window")
         GUI = ElmoCut()
         GUI.background_mode = background_mode
+        GUI.scan_thread.thread_finished.connect(
+            lambda success: startup_log(f"Scan thread finished; success={success}")
+        )
         startup_log("ElmoCut window constructed")
 
         # Background command invocations keep the tray icon active but leave
