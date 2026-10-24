@@ -99,7 +99,7 @@ def acquire_single_instance():
 
 
 
-_LAUNCHER_MUTEX_NAME = "Local\\\\elmoCut.Launcher.v1"
+_LAUNCHER_MUTEX_NAME = "Local\\elmoCut.Launcher.v1"
 _LAUNCHER_MUTEX_HANDLE = None
 
 
