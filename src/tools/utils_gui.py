@@ -24,12 +24,51 @@ def npcap_exists():
     """
     return path.exists(NPCAP_PATH)
 
-def duplicate_elmocut():
-    """
-    Check if there is more than 1 instance of elmoCut.exe
-    """
-    tasklist = terminal('tasklist')
-    return tasklist.lower().count('elmocut.exe') > 1
+# A named mutex is a race-safe single-instance guard. Counting tasklist rows
+# is unreliable while the unelevated launcher and elevated app overlap.
+_INSTANCE_MUTEX_NAME = "Local\\elmoCut.SingleInstance.v2"
+_INSTANCE_MUTEX_HANDLE = None
+_KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_KERNEL32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+_KERNEL32.CreateMutexW.restype = ctypes.c_void_p
+_KERNEL32.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_bool, ctypes.c_wchar_p]
+_KERNEL32.OpenMutexW.restype = ctypes.c_void_p
+_KERNEL32.CloseHandle.argtypes = [ctypes.c_void_p]
+_KERNEL32.CloseHandle.restype = ctypes.c_bool
+_KERNEL32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+_KERNEL32.ReleaseMutex.restype = ctypes.c_bool
+
+
+def single_instance_exists():
+    """Return True only when another process owns the elmoCut mutex."""
+    handle = _KERNEL32.OpenMutexW(0x00100000, False, _INSTANCE_MUTEX_NAME)
+    if not handle:
+        return False
+    _KERNEL32.CloseHandle(handle)
+    return True
+
+
+def acquire_single_instance():
+    """Acquire and retain the named mutex for this process; False means occupied."""
+    global _INSTANCE_MUTEX_HANDLE
+    handle = _KERNEL32.CreateMutexW(None, True, _INSTANCE_MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        _KERNEL32.CloseHandle(handle)
+        return False
+    _INSTANCE_MUTEX_HANDLE = handle
+    return True
+
+
+def release_single_instance():
+    """Release ownership before the controlled --restarting hand-off."""
+    global _INSTANCE_MUTEX_HANDLE
+    handle = _INSTANCE_MUTEX_HANDLE
+    if handle:
+        _INSTANCE_MUTEX_HANDLE = None
+        _KERNEL32.ReleaseMutex(handle)
+        _KERNEL32.CloseHandle(handle)
 
 def check_documents_dir():
     """
@@ -167,14 +206,27 @@ def restart_gui_app(_app):
     DETACHED_PROCESS = 0x00000008
     CREATE_NEW_PROCESS_GROUP = 0x00000200
 
-    subprocess.Popen(
-        args,
-        creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-        close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+    # Free the single-instance guard before the replacement process starts.
+    # Otherwise the new process would correctly mistake this restart for a
+    # duplicate launch and refuse to open.
+    release_single_instance()
+
+    try:
+        subprocess.Popen(
+            args,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        # Restore the guard if relaunching failed, keeping this process usable.
+        try:
+            acquire_single_instance()
+        except Exception:
+            pass
+        raise
 
     _app.from_tray = True   # bypass minimize-to-tray on close
     _app.close()
