@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from scapy.all import arping, ARP, Ether, srp
-from time import sleep
 import errno
 import ipaddress
 import json
@@ -792,37 +791,52 @@ class Scanner():
 
     def ping_scan(self):
         """
-        Ping all devices at once [CPU Killing function]
-           (All Threads will run at the same tine)
+        Ping the configured address range concurrently.
+
+        Completion is counted by the coordinator, not by worker threads.
+        This prevents a failed worker or a lost counter increment from leaving
+        the scan thread waiting forever. The actual Windows ping command is
+        deliberately unchanged.
         """
         self.init()
         self.__ping_done = 0
-        
         self.generate_ips()
         self.ping_thread_pool()
-        
-        while self.__ping_done < self.device_count - 1:
-            # Add a sleep to overcome High CPU usage
-            sleep(.01)
-            self.qt_progress_signal(self.__ping_done)
-        
         return True
-    
-    @threaded
+
     def ping_thread_pool(self):
-        """
-        Control maximum threads running at once
-        """
-        with ThreadPoolExecutor(self.max_threads) as executor:
-            for ip in self.ips:
-                executor.submit(self.ping, ip)
+        """Run the original per-address ping command and collect every result."""
+        total = len(self.ips)
+        if not total:
+            return
+
+        workers = max(1, min(int(self.max_threads), total))
+        failures = []
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(self.ping, ip): ip
+                for ip in self.ips
+            }
+            for completed, future in enumerate(as_completed(futures), start=1):
+                ip = futures[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    failures.append((ip, exc))
+                    print(f"[Scanner] Ping command for {ip} failed: {exc}")
+                self.__ping_done = completed
+                self.qt_progress_signal(completed)
+
+        # If the OS could not start any ping process at all, report a failed
+        # scan rather than claiming success with an empty result set.
+        if len(failures) == total:
+            raise RuntimeError(
+                f"All {total} ping commands failed to execute: {failures[0][1]}"
+            )
 
     def ping(self, ip):
-        """
-        Ping a specific ip with native command "ping -n"
-        """
+        """Run the existing native Windows ping command for one IP."""
         terminal(CMD_PING_DEVICE(ip), decode=False)
-        self.__ping_done += 1
 
 class DhcpSniffer:
     def __init__(self, iface):
