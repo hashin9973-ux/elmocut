@@ -220,6 +220,31 @@ class Scanner():
 
         self.devices.insert(0, self.router)
 
+    @staticmethod
+    def _measure_average_ping(ip):
+        """Return ICMP reachability and mean RTT from successful Windows ping replies."""
+        try:
+            result = subprocess.run(
+                ["ping", "-n", "3", "-w", "400", ip],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=2.5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            samples = [
+                float(value)
+                for value in re.findall(
+                    r"time[=<]\s*(\d+(?:\.\d+)?)\s*ms",
+                    result.stdout,
+                    re.IGNORECASE
+                )
+            ]
+            average_ms = round(sum(samples) / len(samples), 2) if samples else None
+            return result.returncode == 0 or bool(samples), average_ms
+        except (OSError, subprocess.SubprocessError):
+            return False, None
+
     def devices_appender(
         self,
         scan_result,
@@ -241,7 +266,8 @@ class Scanner():
         hostnames = hostnames or {}
         has_port_results = port_results is not None
         port_results = port_results or {}
-        has_ping_results = ping_results is not None
+        measure_ping_results = ping_results is None
+        has_ping_results = True
         ping_results = ping_results or {}
         confirmed_ips = None if online_ips is None else set(online_ips)
         previous_devices = {
@@ -274,6 +300,25 @@ class Scanner():
             clean_results.append((ip, mac, entry))
 
         clean_results.sort(key=lambda item: int(item[0].rsplit(".", 1)[-1]))
+
+        # Every scanner mode reports latency. The advanced scanner supplies
+        # its own measurements; simpler scans measure only the IPs they found.
+        if measure_ping_results and clean_results:
+            targets = sorted({ip for ip, _, _ in clean_results})
+            with ThreadPoolExecutor(max_workers=min(32, len(targets))) as executor:
+                futures = {
+                    executor.submit(self._measure_average_ping, ip): ip
+                    for ip in targets
+                }
+                for future in as_completed(futures):
+                    ip = futures[future]
+                    try:
+                        _, average_ms = future.result()
+                        if average_ms is not None:
+                            ping_results[ip] = average_ms
+                    except Exception as exc:
+                        print(f"[Scanner] Average ping measurement for {ip} failed: {exc}")
+
         confirmed_macs = {
             mac for ip, mac, _ in clean_results
             if confirmed_ips is None or ip in confirmed_ips
@@ -553,28 +598,7 @@ class Scanner():
         # implementation using documented discovery methods, not copied code
         # from Advanced IP Scanner.
         def ping_target(ip):
-            """Return response status and mean RTT from successful ICMP replies."""
-            try:
-                result = subprocess.run(
-                    ["ping", "-n", "3", "-w", "400", ip],
-                    capture_output=True,
-                    text=True,
-                    errors="replace",
-                    timeout=2.5,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                )
-                samples = [
-                    float(value)
-                    for value in re.findall(
-                        r"time[=<]\s*(\d+(?:\.\d+)?)\s*ms",
-                        result.stdout,
-                        re.IGNORECASE
-                    )
-                ]
-                average_ms = round(sum(samples) / len(samples), 2) if samples else None
-                return result.returncode == 0 or bool(samples), average_ms
-            except (OSError, subprocess.SubprocessError):
-                return False, None
+            return self._measure_average_ping(ip)
 
         ping_alive = set()
         ping_results = {}
