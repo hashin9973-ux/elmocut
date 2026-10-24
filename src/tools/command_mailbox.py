@@ -128,6 +128,7 @@ def service_mailbox(command_handler, directory=None, logger=None):
         if (
             not isinstance(request_id, str)
             or not request_id
+            or not isinstance(command, str)
             or command not in ALLOWED_COMMANDS
         ):
             if logger:
