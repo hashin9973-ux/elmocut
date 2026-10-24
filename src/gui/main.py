@@ -4,7 +4,7 @@ from pyperclip import copy
 from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QMessageBox, QStyle, \
                             QMenu, QSystemTrayIcon
 from PyQt6.QtGui import QPixmap, QIcon, QAction, QColor
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSettings
 from ui.ui_main import Ui_MainWindow
 
 from gui.settings import Settings
@@ -111,6 +111,9 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         self.tableScan.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.tableScan.setWordWrap(False)
         self.tableScan.setShowGrid(False)
+        # Restore window geometry and column sizing from the previous session.
+        self._ui_state = QSettings("elmoCut", "elmoCut")
+        self.restoreUiState()
         # self.tableScan.setStyleSheet("QTableWidget::item { border: none; }")
 
         '''
@@ -236,10 +239,41 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
                 'yellow'
             )
 
+    def saveUiState(self):
+        """Persist main-window geometry and user-adjusted table columns."""
+        try:
+            self._ui_state.setValue("main/geometry", self.saveGeometry())
+            self._ui_state.setValue(
+                "main/table_column_widths",
+                [self.tableScan.columnWidth(i) for i in range(self.tableScan.columnCount())]
+            )
+            self._ui_state.sync()
+        except Exception as exc:
+            print(f"[elmoCut] Could not save window state: {exc}")
+
+    def restoreUiState(self):
+        """Restore saved geometry and column widths, tolerating stale settings."""
+        try:
+            geometry = self._ui_state.value("main/geometry")
+            if geometry:
+                self.restoreGeometry(geometry)
+            widths = self._ui_state.value("main/table_column_widths", [])
+            if isinstance(widths, str):
+                widths = [part for part in widths.strip("[]").split(",") if part.strip()]
+            if isinstance(widths, (list, tuple)):
+                for index, width in enumerate(widths[:self.tableScan.columnCount()]):
+                    try:
+                        self.tableScan.setColumnWidth(index, max(32, int(width)))
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:
+            print(f"[elmoCut] Could not restore window state: {exc}")
+
     def hide_all(self):
         """
         Hide option for tray (Hides window and settings)
         """
+        self.saveUiState()
         self.hide()
         self.settings_window.hide()
 
@@ -335,6 +369,7 @@ class ElmoCut(QMainWindow, Ui_MainWindow):
         """
         Run in background if self.minimize is True else exit
         """
+        self.saveUiState()
         # If event recieved from tray icon
         if self.from_tray:
             force_close()
