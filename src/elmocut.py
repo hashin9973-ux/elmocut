@@ -47,6 +47,8 @@ from tools.utils_gui import (
     npcap_exists,
     single_instance_exists,
     acquire_single_instance,
+    acquire_launcher_mutex,
+    release_launcher_mutex,
     repair_settings,
     migrate_settings_file,
 )
@@ -173,16 +175,57 @@ if __name__ == "__main__":
             exit(0)
         startup_log("No existing GUI acknowledged background mode and no instance mutex exists")
 
-    # Request elevation only if a new main application instance is needed.
+    # Serialize unelevated launchers before requesting elevation. The app's
+    # main mutex is acquired by the elevated child later; without this bootstrap
+    # lock, rapid launches can all pass the check and spawn separate children.
     startup_log("Checking administrator token")
     admin_status = is_admin()
     startup_log(f"Administrator token present: {admin_status}")
     if not admin_status:
+        existing_command = "PING" if ping_scan else (
+            "BACKGROUND" if "--background" in argv else "READY"
+        )
+        if single_instance_exists():
+            startup_log("An app instance already owns the mutex; forwarding/waiting")
+            if not wait_for_existing_instance(existing_command, timeout=12.0):
+                startup_log("Existing app did not acknowledge IPC; not spawning a duplicate")
+            exit(0)
+
+        try:
+            launch_lock_acquired = acquire_launcher_mutex()
+        except Exception as exc:
+            startup_log(f"Could not acquire launcher mutex: {exc!r}")
+            launch_lock_acquired = False
+        if not launch_lock_acquired:
+            startup_log("Another launcher is already starting elmoCut")
+            wait_for_existing_instance(existing_command, timeout=12.0)
+            exit(0)
+
+        # Re-check after acquiring the bootstrap lock to close the race with an
+        # instance that claimed the app mutex between the first check and lock.
+        if single_instance_exists():
+            release_launcher_mutex()
+            startup_log("App instance appeared while acquiring launcher lock")
+            wait_for_existing_instance(existing_command, timeout=12.0)
+            exit(0)
+
         startup_log("Requesting elevation for new GUI instance")
         elevated = relaunch_as_admin()
         startup_log(f"Elevation request accepted: {elevated}")
         if not elevated:
+            release_launcher_mutex()
             exit(1)
+
+        # Keep the launcher lock until the child claims the real instance mutex.
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if single_instance_exists():
+                startup_log("Elevated child claimed the app mutex")
+                break
+            time.sleep(0.1)
+        else:
+            startup_log("Timed out waiting for elevated child to claim app mutex")
+        release_launcher_mutex()
         exit(0)
 
     if ping_scan:
@@ -335,9 +378,12 @@ if __name__ == "__main__":
 
                     command = bytes(buffer).split(b"\n", 1)[0].strip()
                     state["handled"] = True
-                    if command == b"PING":
+                    if command == b"READY":
+                        # Confirms that the elevated GUI's IPC server is live.
+                        connection.write(b"OK\\n")
+                    elif command == b"PING":
                         # Acknowledge receipt; the existing GUI owns the scan.
-                        connection.write(b"OK\n")
+                        connection.write(b"OK\\n")
                         QTimer.singleShot(0, run_ping_scan_when_idle)
                     elif command == b"BACKGROUND":
                         GUI.background_mode = True
