@@ -197,35 +197,33 @@ def migrate_settings_file():
             print(f'Migrating settings error: {e}')
             print('New settings file created instead.')
 
-def add_to_startup(exe_path):
+def add_to_startup(command):
     """
-    Add elmoCut to autostart
+    Register the full quoted Windows command for the current user's startup.
+    The value may include arguments such as --background.
     """
-    key = winreg.OpenKey(
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER,
+        HKEY_AUTOSTART_PATH,
+        0,
+        winreg.KEY_SET_VALUE
+    ) as key:
+        winreg.SetValueEx(key, 'elmocut', 0, winreg.REG_SZ, command)
+
+
+def remove_from_startup():
+    """Remove elmoCut from the current user's startup registration."""
+    try:
+        with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             HKEY_AUTOSTART_PATH,
             0,
             winreg.KEY_SET_VALUE
-        )
-    winreg.SetValueEx(
-        key,
-        'elmocut',
-        0,
-        winreg.REG_SZ, exe_path
-    )
-
-def remove_from_startup():
-    """
-    Remove elmoCut from autostart
-    """
-    key = winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            HKEY_AUTOSTART_PATH,
-            0,
-            winreg.KEY_WRITE
-        )
-    try:
-        winreg.DeleteValue(key, 'elmocut')
+        ) as key:
+            try:
+                winreg.DeleteValue(key, 'elmocut')
+            except FileNotFoundError:
+                pass
     except FileNotFoundError:
         pass
 
